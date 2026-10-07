@@ -54,7 +54,7 @@ public:
 
     THROW_GENERIC_EXCEPTION("Pool not big enough")
 
-      return nullptr;
+    //return nullptr;
   }
 
   void ReturnElement(T* _pElement)

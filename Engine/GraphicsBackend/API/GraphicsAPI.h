@@ -11,6 +11,9 @@
 #include "../SamplerConfig.h"
 #include "../TextureSubResource.h"
 
+struct HWND__;
+typedef HWND__* HWND;
+
 namespace api 
 { 
   // Forward declarations for opaque pointers
@@ -33,6 +36,8 @@ namespace api
 	// Window
 
 	void CreateAPIWindow(HWND _hwnd, uint32_t _uMsaaSamples);
+
+	bool IsWindowCreated();
 
 	void OnWindowResize();
 

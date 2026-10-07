@@ -14,3 +14,5 @@ target_link_libraries(GamePrototype PRIVATE Engine ImGui)
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET GamePrototype PROPERTY CXX_STANDARD 20)
 endif()
+
+target_compile_options(GamePrototype PRIVATE /W4 /WX)

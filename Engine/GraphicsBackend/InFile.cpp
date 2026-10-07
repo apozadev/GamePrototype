@@ -13,7 +13,7 @@ namespace file
 
   InFile::~InFile()
   {
-    if (m_pData = nullptr)
+    if (m_pData != nullptr)
     {
       free(m_pData);
     }

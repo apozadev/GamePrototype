@@ -3,3 +3,5 @@
 void Game_Init();
 
 void Game_UpdateAndRender(float _fDeltaTime);
+
+void Game_Shutdown();

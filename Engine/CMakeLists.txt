@@ -1,6 +1,6 @@
 # Select exactly one rendering backend.
-option(BUILD_DX11 "Build the DirectX 11 backend" OFF)
-option(BUILD_VULKAN "Build the Vulkan backend" ON) 
+option(BUILD_DX11 "Build the DirectX 11 backend" ON)
+option(BUILD_VULKAN "Build the Vulkan backend" OFF) 
 
 if(BUILD_DX11 AND BUILD_VULKAN)
 	message(FATAL_ERROR "Select only one rendering backend: BUILD_DX11 or BUILD_VULKAN")
@@ -112,3 +112,5 @@ elseif(BUILD_VULKAN)
 	target_include_directories(ImGui PRIVATE ${Vulkan_INCLUDE_DIRS})
 	target_link_libraries(Engine PUBLIC Vulkan::Vulkan)
 endif()
+
+target_compile_options(Engine PRIVATE /W4 /WX)

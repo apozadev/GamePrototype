@@ -14,21 +14,6 @@ static constexpr int g_iBackBufferHeight = 720;
 
 static const float g_fDeltaTime = 1.f / 60.f;
 
-// simple constant structure for a 4×4 transform
-struct MeshConstants { float mvp[16]; };
-
-struct MaterialConstants { float color[4]; };
-
-struct Vertex { float pos[3]; float normal[3]; float tangent[3]; float color[4]; float uv[2]; };
-
-void GetWindowDimensions(HWND _hWnd, int& iWidth_, int& iHeight_)
-{
-  RECT oWindowRect;
-  GetClientRect(_hWnd, &oWindowRect);
-  iHeight_ = oWindowRect.bottom - oWindowRect.top;
-  iWidth_ = oWindowRect.right - oWindowRect.left;
-}
-
 LRESULT WndProc(
   HWND _hWnd,
   UINT _uMsg,
@@ -42,6 +27,10 @@ LRESULT WndProc(
   case WM_SIZE:
   {
     OutputDebugStringA("WM_SIZE\n");
+    if (api::IsWindowCreated())
+    {
+      api::OnWindowResize();
+    }
   }
   break;
   case WM_DESTROY:
@@ -65,7 +54,7 @@ LRESULT WndProc(
     bool bWasDown = (_lParam & (1 << 30)) != 0;
     bool bIsDown = (_lParam & (1 << 31)) != 0;
 
-    bool bPress = bIsDown && !bWasDown;
+    //bool bPress = bIsDown && !bWasDown;
     bool bRelease = !bIsDown && bWasDown;
 
     if (uVKCode == 'W')
@@ -136,7 +125,7 @@ int WINAPI WinMain(
   oWndClass.hCursor = 0;
   oWndClass.hbrBackground = 0;
   oWndClass.lpszMenuName = NULL;
-  oWndClass.lpszClassName = "HandmadeHeroWndClass";
+  oWndClass.lpszClassName = "GamePrototypeWndClass";
 
 
   if (!RegisterClass(&oWndClass))
@@ -146,7 +135,7 @@ int WINAPI WinMain(
 
   HWND hWnd = CreateWindowEx(0,
     oWndClass.lpszClassName,
-    "HandmadeHero",
+    "Actual Game",
     WS_OVERLAPPEDWINDOW | WS_VISIBLE,
     CW_USEDEFAULT,
     CW_USEDEFAULT,
@@ -164,51 +153,7 @@ int WINAPI WinMain(
 
   api::Initialize();
 
-  api::CreateAPIWindow(hWnd, /*msaa=*/1);
-
-  // --- create a very simple render state that uses our shaders ---
-  RenderStateInfo rsInfo{};
-  //rsInfo.m_sVSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleV.cso";
-  //rsInfo.m_sPSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleP.cso";
-  rsInfo.m_sVSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleV.spv";
-  rsInfo.m_sPSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleP.spv";
-
-  rsInfo.m_uMeshConstantSize = sizeof(MeshConstants);
-  rsInfo.m_bBlendEnabled = false;
-  rsInfo.m_bDepthWrite = false;
-  rsInfo.m_bDepthRead = false;
-  rsInfo.m_eCullMode = CullMode::NONE;
-  rsInfo.m_eDepthCompareOp = DepthCompareOp::ALWAYS;
-
-  api::RenderState* renderState = api::CreateRenderState(rsInfo, /*pRenderTarget=*/nullptr, api::GetWindowMSAASamples());
-
-  ResourceBindInfo bindInfo{};
-  bindInfo.m_sName = "MaterialConstants";
-  bindInfo.m_uStageFlags = PipelineStage::STAGE_PIXEL;
-
-  MaterialConstants materialConstants = { 1.0f, 0.0f, 0.0f, 1.0f };     // red color
-
-  api::ConstantBuffer* cbuffer = api::CreateConstantBuffer(sizeof(MaterialConstants));
-  api::UpdateConstantBuffer(cbuffer, &materialConstants, sizeof(MaterialConstants));
-
-  api::ResourceSet* resourceSet = api::CreateResourceSet(renderState, /*_uSetId=*/0);
-  api::BeginResourceSetSetup(resourceSet);
-  api::ResourceSetAddConstantBuffer(resourceSet, cbuffer, sizeof(MaterialConstants), bindInfo);
-  api::EndResourceSetSetup();
-
-  // --- build a triangle mesh ---
-  Vertex verts[3] = {
-    // pos               |     normal     |     tangent     |    color        |       uv         
-    {  0.0f,  0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
-    {  0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f },
-    { -0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
-  };
-  uint16_t indices[3] = { 0,1,2 };
-
-  api::Mesh* mesh =
-    api::CreateMesh(verts, sizeof(verts),
-      indices, sizeof(indices),
-      sizeof(MeshConstants));
+  api::CreateAPIWindow(hWnd, /*msaa=*/1); 
 
   Game_Init();
 
@@ -234,43 +179,12 @@ int WINAPI WinMain(
       DispatchMessage(&msg);
     }
     
-    Game_UpdateAndRender(g_fDeltaTime);
+    Game_UpdateAndRender(g_fDeltaTime); 
 
-    // begin a frame, then bind state/mesh and draw
-    if (api::BeginDraw() == 0)       // returns 1 when swapchain rebuild is required
-    {
-      api::ClearDefaultRenderTarget();
-
-      api::BindDefaultRenderTarget();
-
-      api::BindRenderState(renderState);
-
-      api::BindResourceSet(renderState, resourceSet);
-
-      MeshConstants constants = { /* compute MVP here */ };
-      api::DrawMesh(renderState,
-        mesh,
-        /*indexCount=*/3,
-        &constants,
-        sizeof(constants));
-
-      api::UnbindDefaultRenderTarget();
-
-      api::EndDraw();
-      api::Present();
-
-      Sleep(32);     // just to slow down the loop a bit, not required            
-    }
-
-    //HDC hDeviceCtx = GetDC(hWnd);
-
-    //int iWidth, iHeight;
-    //GetWindowDimensions(hWnd, iWidth, iHeight);
-
-    //ReleaseDC(hWnd, hDeviceCtx);
-
+    Sleep(16);     // just to slow down the loop a bit, not required            
+    
     DWORD64 ulEndCycleCount = __rdtsc();
-    DWORD64 ulElapsedCycleCount = ulEndCycleCount - ulBeginCycleCount;
+    //DWORD64 ulElapsedCycleCount = ulEndCycleCount - ulBeginCycleCount;
     ulBeginCycleCount = ulEndCycleCount;
 
     LARGE_INTEGER ilEndTime;
@@ -297,12 +211,7 @@ int WINAPI WinMain(
   }
 
   // cleanup
-  api::DestroyMesh(mesh);
-  api::DestroyConstantBuffer(cbuffer);
-  api::DestroyResourceSet(resourceSet);
-  api::DestroyRenderState(renderState);
-  api::DestroyWindow();
-  api::ShutDown();
+  Game_Shutdown();
 
   return 0;
 }

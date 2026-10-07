@@ -151,7 +151,12 @@ namespace api
 
     // ImGui stuff
     SetupImGui();
-  }  
+  }
+
+  bool IsWindowCreated()
+  {
+    return s_oGlobalData.m_oWindow.m_hwnd != NULL;
+  }
 
   void OnWindowResize()
   {

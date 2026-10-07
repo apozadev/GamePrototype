@@ -220,6 +220,11 @@ namespace api
 #endif
   }
 
+  bool IsWindowCreated()
+  {
+    return s_oGlobalData.m_oWindow.m_hWnd != NULL;
+  }
+
   void OnWindowResize()
   {
 
@@ -303,7 +308,7 @@ namespace api
 
   // Mesh
 
-  Mesh* CreateMesh(const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t _uMeshConstantSize)
+  Mesh* CreateMesh(const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t /*_uMeshConstantSize*/)
   {
 
     Mesh* pMesh = s_oMeshPool.PullElement();
@@ -315,7 +320,7 @@ namespace api
     oVBDesc.Usage = D3D11_USAGE_IMMUTABLE;
     oVBDesc.CPUAccessFlags = 0u;
     oVBDesc.MiscFlags = 0u;
-    oVBDesc.ByteWidth = _uVertexDataSize;
+    oVBDesc.ByteWidth = static_cast<UINT>(_uVertexDataSize);
     oVBDesc.StructureByteStride = 0;
 
     D3D11_SUBRESOURCE_DATA oVBData = {};
@@ -330,7 +335,7 @@ namespace api
     oIBDesc.Usage = D3D11_USAGE_IMMUTABLE;
     oIBDesc.CPUAccessFlags = 0u;
     oIBDesc.MiscFlags = 0u;
-    oIBDesc.ByteWidth = _uIndexDataSize;
+    oIBDesc.ByteWidth = static_cast<UINT>(_uIndexDataSize);
     oIBDesc.StructureByteStride = 0;
 
     D3D11_SUBRESOURCE_DATA oIBData = {};
@@ -340,7 +345,7 @@ namespace api
 
     DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateBuffer(&oIBDesc, &oIBData, pMesh->m_pIndexBuffer.GetAddressOf()))
 
-    pMesh->m_uIndexCount = _uIndexDataSize / sizeof(uint16_t);
+    pMesh->m_uIndexCount = static_cast<uint32_t>(_uIndexDataSize / sizeof(uint16_t));
 
     // Model CBuffer
     /*pMesh->m_pModelCBuffer = CreateConstantBuffer(g_pWindow, _uMeshConstantSize);
@@ -371,7 +376,7 @@ namespace api
     oDesc.Usage = D3D11_USAGE_DEFAULT;//D3D11_USAGE_DYNAMIC;
     oDesc.CPUAccessFlags = 0u;// D3D11_CPU_ACCESS_WRITE;
     oDesc.MiscFlags = 0u;
-    oDesc.ByteWidth = _uSize;
+    oDesc.ByteWidth = static_cast<UINT>(_uSize);
     oDesc.StructureByteStride = 0;
 
     DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateBuffer(&oDesc, NULL, pCBuffer->m_pCBuffer.GetAddressOf()));
@@ -379,7 +384,7 @@ namespace api
     return pCBuffer;
   }
 
-  void UpdateConstantBuffer(ConstantBuffer* _pCbuffer, const void* _pData, size_t _uSize)
+  void UpdateConstantBuffer(ConstantBuffer* _pCbuffer, const void* _pData, size_t /*_uSize*/)
   {            
     /*D3D11_MAPPED_SUBRESOURCE oMsr;
     DX11_CHECK(pWindow->m_pContext->Map(_pCBuffer->m_pCBuffer.Get(), 0u, D3D11_MAP_WRITE_DISCARD, 0u, &oMsr));
@@ -403,7 +408,7 @@ namespace api
   {
     Texture* pTexture = s_oTexturePool.PullElement();      
 
-    uint32_t uPixelSize = GetImageFormatSize(_eFormat);
+    uint32_t uPixelSize = static_cast<uint32_t>(GetImageFormatSize(_eFormat));
 
     uint32_t uMemPitch = uPixelSize * _uWidth;
 
@@ -642,7 +647,7 @@ namespace api
   void BindRenderTarget(RenderTarget* _pRenderTarget)
   {   
     // Check bound textures to unbind
-    for (int i = 0; i < s_oGlobalData.m_uVSBoundTextureCount; i++)
+    for (uint32_t i = 0; i < s_oGlobalData.m_uVSBoundTextureCount; i++)
     {
       for(Texture* pRTTexture : _pRenderTarget->m_lstTextures)
       {
@@ -661,7 +666,7 @@ namespace api
 
     if (_pRenderTarget->m_lstRtv.size() > 0u)
     {
-      s_oGlobalData.m_oWindow.m_pContext->OMSetRenderTargets(_pRenderTarget->m_lstRtv.size(), _pRenderTarget->m_lstRtv[0].GetAddressOf(), _pRenderTarget->m_pDsv.Get());
+      s_oGlobalData.m_oWindow.m_pContext->OMSetRenderTargets(static_cast<UINT>(_pRenderTarget->m_lstRtv.size()), _pRenderTarget->m_lstRtv[0].GetAddressOf(), _pRenderTarget->m_pDsv.Get());
     }
     else
     {
@@ -688,7 +693,7 @@ namespace api
     if (_pRenderTarget->m_lstRtv.size() > 0u)
     {
       const std::vector<ID3D11RenderTargetView*> lstNullViews(_pRenderTarget->m_lstRtv.size(), nullptr);
-      s_oGlobalData.m_oWindow.m_pContext->OMSetRenderTargets(_pRenderTarget->m_lstRtv.size(), lstNullViews.data(), nullptr);
+      s_oGlobalData.m_oWindow.m_pContext->OMSetRenderTargets(static_cast<UINT>(_pRenderTarget->m_lstRtv.size()), lstNullViews.data(), nullptr);
     }
     else
     {
@@ -798,11 +803,11 @@ namespace api
     return pRenderState;
   }
 
-  void BeginRenderStateSetup(RenderState* _pRenderState)
+  void BeginRenderStateSetup(RenderState* /*_pRenderState*/)
   {
   }
 
-  void EndRenderStateSetup(const Window* g_pWindow)
+  void EndRenderStateSetup(const Window* /*g_pWindow*/)
   {
   }
 
@@ -924,7 +929,7 @@ namespace api
     }
   }
 
-  const char* GetTextureName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  const char* GetTextureName(const RenderState* /*_pRenderState*/, PipelineStage /*_eStage*/, uint32_t /*_uIdx*/)
   {
     return nullptr;
   }
@@ -1172,7 +1177,7 @@ namespace api
   {
   }
 
-  void BindResourceSet(RenderState* _pRenderState, ResourceSet* _pResourceSet)
+  void BindResourceSet(RenderState* /*_pRenderState*/, ResourceSet* _pResourceSet)
   {
     for (uint32_t i = 0u; i < _pResourceSet->m_uCBufferBindingCount; i++)
     {
@@ -1258,7 +1263,7 @@ namespace api
   {    
   }
 
-  void DrawMesh(RenderState* _pRenderState, Mesh* _pMesh, uint32_t _uIndexCount, const void* _pConstantData, uint32_t _uConstantSize)
+  void DrawMesh(RenderState* /*_pRenderState*/, Mesh* _pMesh, uint32_t _uIndexCount, const void* /*_pConstantData*/, uint32_t /*_uConstantSize*/)
   {
     //UpdateConstantBuffer(g_pWindow, _pMesh->m_pModelCBuffer, _pConstantData, _uConstantSize);
 
@@ -1269,7 +1274,7 @@ namespace api
 
     s_oGlobalData.m_oWindow.m_pContext->IASetVertexBuffers(0u, 1u, _pMesh->m_pVertexBuffer.GetAddressOf(), &uStride, &uOffset);
     s_oGlobalData.m_oWindow.m_pContext->IASetIndexBuffer(_pMesh->m_pIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0u);
-    s_oGlobalData.m_oWindow.m_pContext->DrawIndexed(_pMesh->m_uIndexCount, 0u, 0u);
+    s_oGlobalData.m_oWindow.m_pContext->DrawIndexed(_uIndexCount, 0u, 0u);
 
   }
 
