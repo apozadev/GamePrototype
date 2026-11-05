@@ -37,7 +37,7 @@ set(ENGINE_HEADERS
 	"${GRAPHICS_BACKEND_DIR}/TypedContiguousPool.h"
 	"${GRAPHICS_BACKEND_DIR}/TypedPool.h"
 	"${GRAPHICS_BACKEND_DIR}/Vertex.h"
-)
+ "Mailbox.h" "Mailbox.cpp" "Hash.h" "Material.h" "Material.cpp" "ResourceLoader.h" "Vertex.h" "Renderer.h" "ResourceLoader.cpp" "Renderer.cpp")
 
 if(BUILD_DX11)
 	message(STATUS "Building with DirectX 11 backend")
@@ -101,8 +101,8 @@ endif()
 
 add_library(Engine STATIC ${ENGINE_SOURCES} ${ENGINE_HEADERS})
 
-target_include_directories(Engine PUBLIC "${GRAPHICS_BACKEND_DIR}")
-target_compile_features(Engine PUBLIC cxx_std_17)
+target_include_directories(Engine PUBLIC "${GRAPHICS_BACKEND_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(Engine PUBLIC cxx_std_20)
 target_link_libraries(Engine PUBLIC ImGui)
 
 if(BUILD_DX11)

@@ -1194,10 +1194,10 @@ void CreateDescriptorPool()
   VkDescriptorPoolSize aPoolSizes[2];
 
   aPoolSizes[0].descriptorCount = 999u;
-  aPoolSizes[0].type = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  aPoolSizes[0].uType = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 
   aPoolSizes[1].descriptorCount = 999u;
-  aPoolSizes[1].type = VkDescriptorType::VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  aPoolSizes[1].uType = VkDescriptorType::VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 
   VkDescriptorPoolCreateInfo oPoolInfo{};
   oPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;

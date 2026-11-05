@@ -1468,6 +1468,65 @@ namespace api
     return 0u;
   }
 
+  // Uniform block of the _uIdx-th uniform buffer, using the same ordering as the functions above
+  static const SpvReflectBlockVariable* FindUniformBlock(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  {
+    uint32_t uDescSetCount = 0u;
+    SpvReflectDescriptorSet* aDescSets[4];
+
+    GetDescSetReflection(_pAPIRenderState, _eStage, aDescSets, uDescSetCount);
+
+    uint32_t uCurrIdx = 0u;
+
+    for (uint32_t i = 0u; i < uDescSetCount; i++)
+    {
+      SpvReflectDescriptorSet* pDescSet = aDescSets[i];
+
+      for (uint32_t j = 0u; j < pDescSet->binding_count; j++)
+      {
+        SpvReflectDescriptorBinding* pDesc = pDescSet->bindings[j];
+
+        if (pDesc->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+        {
+          if (uCurrIdx == _uIdx)
+          {
+            return &pDesc->block;
+          }
+
+          uCurrIdx++;
+        }
+      }
+    }
+
+    return nullptr;
+  }
+
+  size_t GetConstantBufferSize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  {
+    if (const SpvReflectBlockVariable* pBlock = FindUniformBlock(_pAPIRenderState, _eStage, _uIdx))
+    {
+      return pBlock->padded_size;
+    }
+
+    THROW_GENERIC_EXCEPTION("[API] Constant buffer not found by index");
+
+    return 0u;
+  }
+
+  size_t GetConstantBufferMemberOffset(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  {
+    const SpvReflectBlockVariable* pBlock = FindUniformBlock(_pAPIRenderState, _eStage, _uIdx);
+
+    if (pBlock && _uMemberIdx < pBlock->member_count)
+    {
+      return pBlock->members[_uMemberIdx].offset;
+    }
+
+    THROW_GENERIC_EXCEPTION("[API] Constant buffer member not found by index");
+
+    return 0u;
+  }
+
   // Render substate
 
   ResourceSet* CreateResourceSet(RenderState* _pRenderState, uint32_t _uSetId)
@@ -1579,7 +1638,11 @@ namespace api
     {
       s_oGlobalData.m_oWindow.m_bResized = false;     
       s_oGlobalData.m_bRenderBegan = false;
-      ImGui::EndFrame();
+      // The window can report a resize before the first frame, when no ImGui frame was ever begun
+      if (ImGui::GetFrameCount() > 0)
+      {
+        ImGui::EndFrame();
+      }
       RecreateSwapchain();      
       ImGui_ImplVulkan_Shutdown();
       ImGui_ImplWin32_Shutdown();

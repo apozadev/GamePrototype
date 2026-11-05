@@ -91,7 +91,7 @@ void DescriptorPoolBuilder::AddPoolSize(VkDescriptorPoolSize&& _rPoolSize)
 
   for (VkDescriptorPoolSize& rPoolSize : m_lstPoolSizes)
   {
-    if (rPoolSize.type == _rPoolSize.type)
+    if (rPoolSize.uType == _rPoolSize.uType)
     {
       rPoolSize.descriptorCount += _rPoolSize.descriptorCount;
       return;

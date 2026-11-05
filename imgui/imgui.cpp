@@ -11041,15 +11041,15 @@ void ImGui::EndDragDropSource()
 }
 
 // Use 'cond' to choose to submit payload on drag start or every frame
-bool ImGui::SetDragDropPayload(const char* type, const void* data, size_t data_size, ImGuiCond cond)
+bool ImGui::SetDragDropPayload(const char* uType, const void* data, size_t data_size, ImGuiCond cond)
 {
     ImGuiContext& g = *GImGui;
     ImGuiPayload& payload = g.DragDropPayload;
     if (cond == 0)
         cond = ImGuiCond_Always;
 
-    IM_ASSERT(type != NULL);
-    IM_ASSERT(strlen(type) < IM_ARRAYSIZE(payload.DataType) && "Payload type can be at most 32 characters long");
+    IM_ASSERT(uType != NULL);
+    IM_ASSERT(strlen(uType) < IM_ARRAYSIZE(payload.DataType) && "Payload type can be at most 32 characters long");
     IM_ASSERT((data != NULL && data_size > 0) || (data == NULL && data_size == 0));
     IM_ASSERT(cond == ImGuiCond_Always || cond == ImGuiCond_Once);
     IM_ASSERT(payload.SourceId != 0);                               // Not called between BeginDragDropSource() and EndDragDropSource()
@@ -11057,7 +11057,7 @@ bool ImGui::SetDragDropPayload(const char* type, const void* data, size_t data_s
     if (cond == ImGuiCond_Always || payload.DataFrameCount == -1)
     {
         // Copy payload
-        ImStrncpy(payload.DataType, type, IM_ARRAYSIZE(payload.DataType));
+        ImStrncpy(payload.DataType, uType, IM_ARRAYSIZE(payload.DataType));
         g.DragDropPayloadBufHeap.resize(0);
         if (data_size > sizeof(g.DragDropPayloadBufLocal))
         {
@@ -11145,14 +11145,14 @@ bool ImGui::IsDragDropPayloadBeingAccepted()
     return g.DragDropActive && g.DragDropAcceptIdPrev != 0;
 }
 
-const ImGuiPayload* ImGui::AcceptDragDropPayload(const char* type, ImGuiDragDropFlags flags)
+const ImGuiPayload* ImGui::AcceptDragDropPayload(const char* uType, ImGuiDragDropFlags flags)
 {
     ImGuiContext& g = *GImGui;
     ImGuiWindow* window = g.CurrentWindow;
     ImGuiPayload& payload = g.DragDropPayload;
     IM_ASSERT(g.DragDropActive);                        // Not called between BeginDragDropTarget() and EndDragDropTarget() ?
     IM_ASSERT(payload.DataFrameCount != -1);            // Forgot to call EndDragDropTarget() ?
-    if (type != NULL && !payload.IsDataType(type))
+    if (uType != NULL && !payload.IsDataType(uType))
         return NULL;
 
     // Accept smallest drag target bounding box, this allows us to nest drag targets conveniently without ordering constraints.
@@ -11302,7 +11302,7 @@ void ImGui::LogRenderedText(const ImVec2* ref_pos, const char* text, const char*
 }
 
 // Start logging/capturing text output
-void ImGui::LogBegin(ImGuiLogType type, int auto_open_depth)
+void ImGui::LogBegin(ImGuiLogType uType, int auto_open_depth)
 {
     ImGuiContext& g = *GImGui;
     ImGuiWindow* window = g.CurrentWindow;
@@ -11310,7 +11310,7 @@ void ImGui::LogBegin(ImGuiLogType type, int auto_open_depth)
     IM_ASSERT(g.LogFile == NULL);
     IM_ASSERT(g.LogBuffer.empty());
     g.LogEnabled = true;
-    g.LogType = type;
+    g.LogType = uType;
     g.LogNextPrefix = g.LogNextSuffix = NULL;
     g.LogDepthRef = window->DC.TreeDepth;
     g.LogDepthToExpand = ((auto_open_depth >= 0) ? auto_open_depth : g.LogDepthToExpandDefault);

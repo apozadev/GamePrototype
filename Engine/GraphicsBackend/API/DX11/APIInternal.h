@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <inttypes.h>
+#include <string>
 
 #include "ImageFormat.h"
 #include "BlendEnums.h"

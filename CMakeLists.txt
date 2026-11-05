@@ -20,7 +20,7 @@ add_library(ImGui STATIC
   imgui/backends/imgui_impl_win32.cpp
 )
 target_include_directories(ImGui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/imgui")
-target_compile_features(ImGui PUBLIC cxx_std_17)
+target_compile_features(ImGui PUBLIC cxx_std_20)
 
 # Include sub-projects.
 add_subdirectory ("Engine")

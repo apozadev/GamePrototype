@@ -1,102 +1,79 @@
 ﻿#include "Game.h"
 
-#include "API/GraphicsAPI.h"
+#include <cmath>
 
-// simple constant structure for a 4×4 transform
-struct MeshConstants { float mvp[16]; };
+#include "Renderer.h"
+#include "ResourceLoader.h"
 
-struct MaterialConstants { float color[4]; };
+//-----------------------------------------------------------------------------
 
-struct Vertex { float pos[3]; float normal[3]; float tangent[3]; float color[4]; float uv[2]; };
+// Static so it outlives the async upload (see MeshCreateRequest lifetime TODO)
+static const Vertex s_aTriangleVerts[3] = {
+  // pos               |     normal      |     tangent     |    color              |       uv
+  {  0.0f,  0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
+  {  0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f },
+  { -0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
+};
 
-static api::RenderState* renderState = nullptr;
+static const uint16_t s_aTriangleIndices[3] = { 0, 1, 2 };
 
-api::ResourceSet* resourceSet = nullptr;
+static ResourceHandle s_hTriangleMesh = INVALID_RESOURCE_HANDLE;
+static ResourceHandle s_hTriangleMaterial = INVALID_RESOURCE_HANDLE;
+static RenderObjectHandle s_hTriangle = 0;
 
-api::ConstantBuffer* cbuffer = nullptr;
+static float s_fTime = 0.f;
 
-static api::Mesh* mesh = nullptr;
+//-----------------------------------------------------------------------------
 
 void Game_Init()
 {
-  // --- create a very simple render state that uses our shaders ---
-  RenderStateInfo rsInfo{};
-  rsInfo.m_sVSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleV.cso";
-  rsInfo.m_sPSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleP.cso";
-  //rsInfo.m_sVSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleV.spv";
-  //rsInfo.m_sPSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleP.spv";
+  MeshLoadRequestInfo oMeshInfo = {};
+  oMeshInfo.pVertexData = s_aTriangleVerts;
+  oMeshInfo.zVertexDataSize = sizeof(s_aTriangleVerts);
+  oMeshInfo.pIndexData = s_aTriangleIndices;
+  oMeshInfo.zIndexDataSize = sizeof(s_aTriangleIndices);
+  s_hTriangleMesh = LoadResourceAsync(oMeshInfo);
 
-  rsInfo.m_uMeshConstantSize = sizeof(MeshConstants);
-  rsInfo.m_bBlendEnabled = false;
-  rsInfo.m_bDepthWrite = false;
-  rsInfo.m_bDepthRead = false;
-  rsInfo.m_eCullMode = CullMode::NONE;
-  rsInfo.m_eDepthCompareOp = DepthCompareOp::ALWAYS;
-
-  renderState = api::CreateRenderState(rsInfo, /*pRenderTarget=*/nullptr, api::GetWindowMSAASamples());
-
-  ResourceBindInfo bindInfo{};
-  bindInfo.m_sName = "MaterialConstants";
-  bindInfo.m_uStageFlags = PipelineStage::STAGE_PIXEL;
-
-  MaterialConstants materialConstants = { 1.0f, 0.0f, 0.0f, 1.0f };     // red color
-
-  cbuffer = api::CreateConstantBuffer(sizeof(MaterialConstants));
-  api::UpdateConstantBuffer(cbuffer, &materialConstants, sizeof(MaterialConstants));
-
-  resourceSet = api::CreateResourceSet(renderState, /*_uSetId=*/0);
-  api::BeginResourceSetSetup(resourceSet);
-  api::ResourceSetAddConstantBuffer(resourceSet, cbuffer, sizeof(MaterialConstants), bindInfo);
-  api::EndResourceSetSetup();
-
-  // --- build a triangle mesh ---
-  Vertex verts[3] = {
-    // pos               |     normal      |     tangent     |    color              |       uv         
-    {  0.0f,  0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
-    {  0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f },
-    { -0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
-  };
-  uint16_t indices[3] = { 0,1,2 };
-
-  mesh = api::CreateMesh(verts, sizeof(verts),
-                        indices, sizeof(indices),
-                        sizeof(MeshConstants));
+  MaterialLoadRequestInfo oMaterialInfo = {};
+  oMaterialInfo.pVSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleV.cso";
+  oMaterialInfo.pPSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleP.cso";
+  oMaterialInfo.bBlendEnabled = false;
+  s_hTriangleMaterial = LoadResourceAsync(oMaterialInfo);
 }
 
-void Game_UpdateAndRender(float /*_fDeltaTime*/)
+void Game_Update(float _fDeltaTime)
 {
-  // begin a frame, then bind state/mesh and draw
-  if (api::BeginDraw() == 0)       // returns 1 when swapchain rebuild is required
+  s_fTime += _fDeltaTime;
+
+  MailboxHandle hMailbox = AcquireMailboxWrite();
+
+  // Create the render object once its resources are on the GPU
+  if (s_hTriangle == 0 &&
+    GetResourceState(s_hTriangleMesh) == ResourceState::READY &&
+    GetResourceState(s_hTriangleMaterial) == ResourceState::READY)
   {
-    api::ClearDefaultRenderTarget();
-
-    api::BindDefaultRenderTarget();
-
-    api::BindRenderState(renderState);
-
-    api::BindResourceSet(renderState, resourceSet);
-
-    MeshConstants constants = { /* compute MVP here */ };
-    api::DrawMesh(renderState,
-      mesh,
-      /*indexCount=*/3,
-      &constants,
-      sizeof(constants));
-
-    api::UnbindDefaultRenderTarget();
-
-    api::EndDraw();
-    api::Present();    
+    s_hTriangle = CreateRenderObject(hMailbox);
+    SetRenderObjectMesh(hMailbox, s_hTriangle, s_hTriangleMesh);
+    SetRenderObjectMaterial(hMailbox, s_hTriangle, s_hTriangleMaterial);
   }
+
+  // Cycle through hues, one RGB channel 120 degrees apart from the next
+  if (s_hTriangle != 0)
+  {
+    const float fPhase = 2.0943951f; // 2*pi/3
+    const float vColor[4] = {
+      0.5f + 0.5f * sinf(s_fTime),
+      0.5f + 0.5f * sinf(s_fTime + fPhase),
+      0.5f + 0.5f * sinf(s_fTime + 2.f * fPhase),
+      1.f
+    };
+    SetMaterialProperty(hMailbox, s_hTriangleMaterial, "color", vColor, sizeof(vColor));
+  }
+
+  ReleaseMailboxWrite(hMailbox);
 }
 
 void Game_Shutdown()
 {
   // Should we really do anything here?
-  api::DestroyMesh(mesh);
-  api::DestroyConstantBuffer(cbuffer);
-  api::DestroyResourceSet(resourceSet);
-  api::DestroyRenderState(renderState);
-  api::DestroyWindow();
-  api::ShutDown();
 }

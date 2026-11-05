@@ -278,7 +278,7 @@ namespace api
     ImGui::Render();
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-    ID3D11RenderTargetView* pNullView =  nullptr;      
+    ID3D11RenderTargetView* pNullView =  nullptr;
     s_oGlobalData.m_oWindow.m_pContext->OMSetRenderTargets(1, &pNullView, nullptr);
   }
 
@@ -288,20 +288,22 @@ namespace api
     RestoreOriginalWndProc(s_oGlobalData.m_oWindow.m_hWnd);
 
     ImGui_ImplDX11_Shutdown();
-    ImGui_ImplWin32_Shutdown();       
+    ImGui_ImplWin32_Shutdown();
 
     DestroyTexture(s_oGlobalData.m_oWindow.m_pDummyTexture);
 
     s_oGlobalData.m_oWindow.m_pRtv = nullptr;
     s_oGlobalData.m_oWindow.m_pDsv = nullptr;
     s_oGlobalData.m_oWindow.m_pColorTexture = nullptr;
-    s_oGlobalData.m_oWindow.m_pDSTexture = nullptr;      
-    s_oGlobalData.m_oWindow.m_pSwapchain = nullptr;      
+    s_oGlobalData.m_oWindow.m_pDSTexture = nullptr;
+    s_oGlobalData.m_oWindow.m_pSwapchain = nullptr;
     s_oGlobalData.m_oWindow.m_pContext = nullptr;
 
+#ifndef NDEBUG
     Microsoft::WRL::ComPtr<ID3D11Debug> pDebug;
     s_oGlobalData.m_oWindow.m_pDevice.As(&pDebug);
     pDebug->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL);
+#endif
 
     s_oGlobalData.m_oWindow.m_pDevice = nullptr;
   }
@@ -713,8 +715,8 @@ namespace api
 
     RenderState* pRenderState = s_oRenderStatePool.PullElement();
 
-    file::InFile oVsFile(_oInfo.m_sVSFilename.c_str());
-    file::InFile oPsFile(_oInfo.m_sPSFilename.c_str());
+    file::InFile oVsFile(_oInfo.m_sVSFilename.data());
+    file::InFile oPsFile(_oInfo.m_sPSFilename.data());
       
     DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateVertexShader(oVsFile.GetData(), oVsFile.GetSize(), nullptr, pRenderState->m_pVertexShader.ReleaseAndGetAddressOf()));            
     DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreatePixelShader(oPsFile.GetData(), oPsFile.GetSize(), nullptr, pRenderState->m_pPixelShader.ReleaseAndGetAddressOf()));      
@@ -728,8 +730,10 @@ namespace api
     {
       size_t uSlashPosGS = _oInfo.m_sGSFilename.find_last_of('/');        
       size_t uDotPosGS = _oInfo.m_sGSFilename.find_last_of('.');
-      std::string sGSPath = _oInfo.m_sGSFilename.empty() ? "" : _oInfo.m_sGSFilename.substr(0, uSlashPosGS) + "/DX11";
-      std::string sGSFilename = _oInfo.m_sGSFilename.empty() ? "" : _oInfo.m_sGSFilename.substr(uSlashPosGS, uDotPosGS - uSlashPosGS) + ".cso";
+      std::string sGSPath(_oInfo.m_sGSFilename.substr(0, uSlashPosGS));
+      sGSPath = sGSPath.empty() ? "" : sGSPath.substr(0, uSlashPosGS) + "/DX11";
+      std::string sGSFilename(_oInfo.m_sGSFilename);
+      sGSFilename = sGSFilename.empty() ? "" : sGSFilename.substr(uSlashPosGS, uDotPosGS - uSlashPosGS) + ".cso";
 
       file::InFile oGsFile(_oInfo.m_sGSFilename.empty() ? "" : (sGSPath + sGSFilename).c_str());
 
@@ -1080,6 +1084,41 @@ namespace api
     return uSize;
   }
 
+  size_t GetConstantBufferSize(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  {
+    D3D11_SHADER_BUFFER_DESC oDesc{};
+
+    if (GetBufferByIndex(_pRenderState, _eStage, _uIdx, nullptr, oDesc))
+    {
+      return oDesc.Size;
+    }
+
+    return 0u;
+  }
+
+  size_t GetConstantBufferMemberOffset(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  {
+    D3D11_SHADER_BUFFER_DESC oBufferDesc = {};
+
+    ID3D11ShaderReflectionConstantBuffer* pCBuffer = nullptr;
+
+    if (GetBufferByIndex(_pRenderState, _eStage, _uIdx, &pCBuffer, oBufferDesc))
+    {
+      if (_uMemberIdx < oBufferDesc.Variables)
+      {
+        if (ID3D11ShaderReflectionVariable* pVariable = pCBuffer->GetVariableByIndex(_uMemberIdx))
+        {
+          D3D11_SHADER_VARIABLE_DESC oVarDesc = {};
+          pVariable->GetDesc(&oVarDesc);
+
+          return oVarDesc.StartOffset;
+        }
+      }
+    }
+
+    return 0u;
+  }
+
   // Render substate
 
   ResourceSet* CreateResourceSet(RenderState* _pRenderState, uint32_t /*_uSetId*/)
@@ -1244,7 +1283,11 @@ namespace api
 
       ImGui_ImplDX11_CreateDeviceObjects();
 
-      ImGui::EndFrame();
+      // The window can report a resize before the first frame, when no ImGui frame was ever begun
+      if (ImGui::GetFrameCount() > 0)
+      {
+        ImGui::EndFrame();
+      }
 
       ImGui::GetIO().DisplaySize.x = static_cast<float>(s_oGlobalData.m_oWindow.m_uWidth);
       ImGui::GetIO().DisplaySize.y = static_cast<float>(s_oGlobalData.m_oWindow.m_uHeight);

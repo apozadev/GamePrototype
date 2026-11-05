@@ -1,11 +1,12 @@
 #include <windows.h>
 #include <stdint.h>
+#include <thread>
 
 #include "API/GraphicsAPI.h"
+#include "Renderer.h"
+#include "ResourceLoader.h"
 
 #include "../../Game.h"
-
-// TODO: addn glfw library
 
 static bool g_bRunning = true;
 
@@ -27,10 +28,8 @@ LRESULT WndProc(
   case WM_SIZE:
   {
     OutputDebugStringA("WM_SIZE\n");
-    if (api::IsWindowCreated())
-    {
-      api::OnWindowResize();
-    }
+    // The render thread owns the swapchain, let it handle the resize
+    RequestWindowResize();
   }
   break;
   case WM_DESTROY:
@@ -44,6 +43,9 @@ LRESULT WndProc(
   case WM_ACTIVATEAPP:
     OutputDebugStringA("WM_ACTIVATEAPP\n");
     break;
+  case WM_QUIT:
+    g_bRunning = false;
+    break;
   case WM_SYSKEYDOWN:
   case WM_SYSKEYUP:
   case WM_KEYDOWN:
@@ -51,11 +53,12 @@ LRESULT WndProc(
   {
     uint32_t uVKCode = (uint32_t)_wParam;
 
-    bool bWasDown = (_lParam & (1 << 30)) != 0;
-    bool bIsDown = (_lParam & (1 << 31)) != 0;
+    uint32_t uKeyFlags = static_cast<uint32_t>(_lParam);
+    bool bWasDown = (uKeyFlags & (1u << 30)) != 0;
+    bool bIsDown = (uKeyFlags & (1u << 31)) == 0;
 
-    //bool bPress = bIsDown && !bWasDown;
-    bool bRelease = !bIsDown && bWasDown;
+    [[maybe_unused]] bool bPress = bIsDown && !bWasDown;
+    [[maybe_unused]] bool bRelease = !bIsDown && bWasDown;
 
     if (uVKCode == 'W')
     {
@@ -89,7 +92,7 @@ LRESULT WndProc(
     }
     if (uVKCode == VK_ESCAPE)
     {
-      if (bRelease)
+      if (bPress)
       {
         g_bRunning = false;
       }
@@ -153,7 +156,12 @@ int WINAPI WinMain(
 
   api::Initialize();
 
-  api::CreateAPIWindow(hWnd, /*msaa=*/1); 
+  api::CreateAPIWindow(hWnd, /*msaa=*/1);
+
+  // From here on, only the render thread touches the graphics API
+  // (until it is joined below).
+  std::thread oRenderThread(RenderThreadFnc);
+  std::thread oLoaderThread(WorkerThreadProcessLoadRequests);
 
   Game_Init();
 
@@ -170,16 +178,11 @@ int WINAPI WinMain(
     MSG msg;
     while (PeekMessage(&msg, hWnd, 0, 0, PM_REMOVE))
     {
-      if (msg.message == WM_QUIT)
-      {
-        g_bRunning = false;
-      }
-
       TranslateMessage(&msg);
       DispatchMessage(&msg);
     }
     
-    Game_UpdateAndRender(g_fDeltaTime); 
+    Game_Update(g_fDeltaTime);
 
     Sleep(16);     // just to slow down the loop a bit, not required            
     
@@ -212,6 +215,16 @@ int WINAPI WinMain(
 
   // cleanup
   Game_Shutdown();
+
+  RequestLoaderThreadExit();
+  oLoaderThread.join();
+
+  RequestRenderThreadExit();
+  oRenderThread.join();
+
+  // Render thread is gone, the main thread owns the API again
+  api::DestroyWindow();
+  api::ShutDown();
 
   return 0;
 }

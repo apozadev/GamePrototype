@@ -10,9 +10,9 @@ struct RenderStateInfo
 {  
   uint32_t m_uMeshConstantSize;
 
-  std::string m_sPSFilename;
-  std::string m_sGSFilename;
-  std::string m_sVSFilename;
+  std::string_view m_sPSFilename;
+  std::string_view m_sGSFilename;
+  std::string_view m_sVSFilename;
 
   bool m_bBlendEnabled;
   BlendOp m_eBlendOp;

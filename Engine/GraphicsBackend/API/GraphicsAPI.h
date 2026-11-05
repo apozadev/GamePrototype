@@ -119,6 +119,9 @@ namespace api
 
 	std::string GetConstantBufferName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx);
 
+	// Total size in bytes, including the API's padding rules
+	size_t GetConstantBufferSize(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx);
+
 	const char* GetTextureName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx);
 
 	uint32_t GetConstantBufferMemberCount(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx);
@@ -126,6 +129,9 @@ namespace api
 	std::string GetConstantBufferMemberName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx);
 
 	size_t GetConstantBufferMemberSize(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx);
+
+	// Byte offset of the member from the start of the buffer, as laid out by the shader compiler
+	size_t GetConstantBufferMemberOffset(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx);
 
 	ConstantBufferType GetConstantBufferMemberType(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx);
 
