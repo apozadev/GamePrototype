@@ -18,6 +18,8 @@ set(ENGINE_SOURCES
 
 set(ENGINE_HEADERS
 	"${GRAPHICS_BACKEND_DIR}/API/GraphicsAPI.h"
+	"${GRAPHICS_BACKEND_DIR}/APIAllocation.h"
+	"${GRAPHICS_BACKEND_DIR}/APIBoundary.h"
 	"${GRAPHICS_BACKEND_DIR}/BlendEnums.h"
 	"${GRAPHICS_BACKEND_DIR}/ConstantBufferTypes.h"
 	"${GRAPHICS_BACKEND_DIR}/CullMode.h"
@@ -34,10 +36,37 @@ set(ENGINE_HEADERS
 	"${GRAPHICS_BACKEND_DIR}/SamplerConfig.h"
 	"${GRAPHICS_BACKEND_DIR}/TextureSubResource.h"
 	"${GRAPHICS_BACKEND_DIR}/TextureUsage.h"
-	"${GRAPHICS_BACKEND_DIR}/TypedContiguousPool.h"
-	"${GRAPHICS_BACKEND_DIR}/TypedPool.h"
 	"${GRAPHICS_BACKEND_DIR}/Vertex.h"
- "Mailbox.h" "Mailbox.cpp" "Hash.h" "Material.h" "Material.cpp" "ResourceLoader.h" "Vertex.h" "Renderer.h" "ResourceLoader.cpp" "Renderer.cpp")
+	"Asserts.h"
+	"Asserts.cpp"
+	"Log.h"
+	"Log.cpp" 
+	"Mailbox.h" 
+	"Mailbox.cpp" 
+	"Hash.h" 
+	"Material.h"
+	"Material.cpp" 
+	"ResourceLoader.h"
+	"Vertex.h" 
+	"Renderer.h" 
+	"ResourceLoader.cpp"
+	"Renderer.cpp" 
+	"Memory/LinearAllocator.h" 
+	"Memory/LinearAllocator.cpp"
+	"Memory/MemoryUtil.h"
+	"Memory/RingAllocator.h"
+	"Memory/RingAllocator.cpp"
+	"Memory/ThreadArenas.h"
+	"Memory/ThreadArenas.cpp"
+	"Platform/Debug.h"
+	"Platform/Memory.h")
+
+# Platform layer: one implementation per OS
+if(WIN32)
+	list(APPEND ENGINE_SOURCES "Platform/Memory_win32.cpp" "Platform/Debug_win32.cpp")
+else()
+	message(FATAL_ERROR "No platform layer for this OS yet (see Engine/Platform)")
+endif()
 
 if(BUILD_DX11)
 	message(STATUS "Building with DirectX 11 backend")
@@ -47,7 +76,6 @@ if(BUILD_DX11)
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/APIInternal.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11API.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Exception.cpp"
-		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Pools.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/RenderTargetBuilder.cpp"
 	)
 	list(APPEND ENGINE_HEADERS
@@ -57,7 +85,6 @@ if(BUILD_DX11)
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Data.h"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Exception.h"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Macros.h"
-		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Pools.h"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/Mesh.h"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/RenderState.h"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/RenderTarget.h"
@@ -76,7 +103,6 @@ message(STATUS "Building with Vulkan backend")
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/RenderTargetBuilder.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanAPI.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanException.cpp"
-		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanPools.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanShaderReflection.cpp"
 	)
 	list(APPEND ENGINE_HEADERS
@@ -93,7 +119,6 @@ message(STATUS "Building with Vulkan backend")
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanData.h"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanException.h"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanMacros.h"
-		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanPools.h"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanShaderReflection.h"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/Window.h"
 	)

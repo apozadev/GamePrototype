@@ -68,7 +68,7 @@ bool DescriptorSetLayoutBuilder::Contains(VkDescriptorSetLayoutBinding _oBinding
   return false;
 }
 
-uint32_t DescriptorSetLayoutBuilder::FindBinding(const std::string& _sName, VkShaderStageFlags _uStageFlags, VkDescriptorType _eType) const
+uint32_t DescriptorSetLayoutBuilder::FindBinding(const char* _sName, VkShaderStageFlags _uStageFlags, VkDescriptorType _eType) const
 {
   for (int i = 0; i < m_lstNames.size(); i++)
   {

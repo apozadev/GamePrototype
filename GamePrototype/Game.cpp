@@ -7,7 +7,7 @@
 
 //-----------------------------------------------------------------------------
 
-// Static so it outlives the async upload (see MeshCreateRequest lifetime TODO)
+// LoadResourceAsync copies the data, it doesn't need to outlive the call
 static const Vertex s_aTriangleVerts[3] = {
   // pos               |     normal      |     tangent     |    color              |       uv
   {  0.0f,  0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
@@ -25,7 +25,7 @@ static float s_fTime = 0.f;
 
 //-----------------------------------------------------------------------------
 
-void Game_Init()
+void Game_Init(ThreadArenas* /*_pArenas*/)
 {
   MeshLoadRequestInfo oMeshInfo = {};
   oMeshInfo.pVertexData = s_aTriangleVerts;
@@ -35,13 +35,15 @@ void Game_Init()
   s_hTriangleMesh = LoadResourceAsync(oMeshInfo);
 
   MaterialLoadRequestInfo oMaterialInfo = {};
-  oMaterialInfo.pVSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleV.cso";
-  oMaterialInfo.pPSFilename = "D:/Documents/GraphicsBackend/apps/assets/shaders/triangleP.cso";
+  // Relative to the executable: the platform layer sets the working directory,
+  // and the build copies GamePrototype/assets next to the exe.
+  oMaterialInfo.pVSFilename = "assets/shaders/triangleV.cso";
+  oMaterialInfo.pPSFilename = "assets/shaders/triangleP.cso";
   oMaterialInfo.bBlendEnabled = false;
   s_hTriangleMaterial = LoadResourceAsync(oMaterialInfo);
 }
 
-void Game_Update(float _fDeltaTime)
+void Game_Update(ThreadArenas* /*_pArenas*/, float _fDeltaTime)
 {
   s_fTime += _fDeltaTime;
 
@@ -73,7 +75,7 @@ void Game_Update(float _fDeltaTime)
   ReleaseMailboxWrite(hMailbox);
 }
 
-void Game_Shutdown()
+void Game_Shutdown(ThreadArenas* /*_pArenas*/)
 {
   // Should we really do anything here?
 }

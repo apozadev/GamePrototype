@@ -1,23 +1,17 @@
 #include "Mailbox.h"
 
 #include <cstring>
-#include <assert.h>
+
+#include "Asserts.h"
+#include "Log.h"
+#include "Memory/MemoryUtil.h"
 
 // Defined by the owner of the mailboxes (Renderer.cpp)
 Mailbox& GetMailbox(MailboxHandle _hMailbox);
 
 //-----------------------------------------------------------------------------
 
-static void* AlignUp(void* _pAddress, size_t _zAlignment)
-{
-  uintptr_t addr = reinterpret_cast<uintptr_t>(_pAddress);
-  uintptr_t alignedAddr = (addr + (_zAlignment - 1)) & ~(_zAlignment - 1);
-  return reinterpret_cast<void*>(alignedAddr);
-}
-
-//-----------------------------------------------------------------------------
-
-void AddMessageToMailboxInternal(MailboxHandle _hMailbox, uint32_t _uType, const void* _pMessage, size_t _zSize, size_t _zAlignment)
+bool AddMessageToMailboxInternal(MailboxHandle _hMailbox, uint32_t _uType, const void* _pMessage, size_t _zSize, size_t _zAlignment)
 {
   Mailbox& rMailbox = GetMailbox(_hMailbox);
 
@@ -33,8 +27,13 @@ void AddMessageToMailboxInternal(MailboxHandle _hMailbox, uint32_t _uType, const
   if (rMailbox.zOffset > rMailbox.zCapacity ||
     zRequiredSize > rMailbox.zCapacity - rMailbox.zOffset)
   {
-    // TODO: Handle insufficient capacity.
-    return;
+    // Dropping silently would desync update and render state (e.g. a handle
+    // returned for a render object that never gets created), so make it loud.
+    // Logged in every build; the assert adds the dialog in Debug
+    LogError("Mailbox %u full: dropped message type %u (%zu bytes, %zu/%zu used)",
+      _hMailbox, _uType, zRequiredSize, rMailbox.zOffset, rMailbox.zCapacity);
+    ASSERT_MSG(false, "Mailbox full, increase MAILBOX_CAPACITY");
+    return false;
   }
 
   MailboxMessageHeader oHeader;
@@ -47,6 +46,8 @@ void AddMessageToMailboxInternal(MailboxHandle _hMailbox, uint32_t _uType, const
   memcpy(pPayloadOffset, _pMessage, _zSize);
 
   rMailbox.zOffset += zRequiredSize;
+
+  return true;
 }
 
 //-----------------------------------------------------------------------------
@@ -63,7 +64,7 @@ bool PullMessageFromMailbox(Mailbox* _pMailbox, size_t& _zReadOffset_, const Mai
 
   size_t zDataOffset = sizeof(MailboxMessageHeader) + pHeader->uAlignmentPadding;
 
-  assert(_zReadOffset_ + zDataOffset + pHeader->uSize <= _pMailbox->zOffset);
+  ASSERT_MSG(_zReadOffset_ + zDataOffset + pHeader->uSize <= _pMailbox->zOffset, "Corrupted mailbox message");
 
   *ppData_ = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pHeader) + zDataOffset);
 

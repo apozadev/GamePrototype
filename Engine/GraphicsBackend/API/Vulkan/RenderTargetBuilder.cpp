@@ -1,7 +1,8 @@
 #include "API/Vulkan/RenderTargetBuilder.h"
 #include "API/Vulkan/RenderTarget.h"
 #include "API/Vulkan/APIInternal.h"
-#include "API/Vulkan/VulkanPools.h"
+#include "API/Vulkan/Texture.h"
+#include "Exception.h"
 #include "API/Vulkan/VulkanMacros.h"
 #include "API/Vulkan/Window.h"
 
@@ -18,7 +19,10 @@ namespace api
 
     uint32_t uAttachmentCount = m_lstColorTextures.size() + m_lstColorResolveTextures.size() + (m_pDepthStencilTexture ? 1u : 0u);
 
-    m_pRenderTarget->m_pImageViews = s_oVkImageViewPool.PullElements(uAttachmentCount);
+    if (m_lstColorTextures.size() > MAX_RENDER_TARGET_COLOR_ATTACHMENTS || uAttachmentCount > MAX_RENDER_TARGET_ATTACHMENTS)
+    {
+      THROW_GENERIC_EXCEPTION("[API] Too many render target attachments")
+    }
 
     uint32_t uAttachmentIdx = 0u;
 
@@ -33,7 +37,7 @@ namespace api
         0u, pTexture->m_uLayers,
         pTexture->m_uLayers > 1u ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
         VK_IMAGE_ASPECT_COLOR_BIT,
-        m_pRenderTarget->m_pImageViews[uAttachmentIdx++]);
+        m_pRenderTarget->m_aImageViews[uAttachmentIdx++]);
 
       m_pRenderTarget->m_aColorTextures[i] = pTexture;
       m_pRenderTarget->m_aColorTexturesMipLevels[i] = m_lstColorMipLevels[i];
@@ -49,7 +53,7 @@ namespace api
         0u, pTexture->m_uLayers,
         pTexture->m_uLayers > 1u ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
         VK_IMAGE_ASPECT_COLOR_BIT,
-        m_pRenderTarget->m_pImageViews[uAttachmentIdx++]);
+        m_pRenderTarget->m_aImageViews[uAttachmentIdx++]);
 
       m_pRenderTarget->m_aResolveTextures[i] = pTexture;
     }    
@@ -63,7 +67,7 @@ namespace api
         0u, m_pDepthStencilTexture->m_uLayers,
         m_pDepthStencilTexture->m_uLayers > 1u ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
         VK_IMAGE_ASPECT_DEPTH_BIT,
-        m_pRenderTarget->m_pImageViews[uAttachmentIdx++]);
+        m_pRenderTarget->m_aImageViews[uAttachmentIdx++]);
 
       m_pRenderTarget->m_pDepthTexture = m_pDepthStencilTexture;
       m_pRenderTarget->m_uDepthTextureMipLevel = m_uDepthMipLevel;
@@ -72,7 +76,7 @@ namespace api
     VkFramebufferCreateInfo oFramebufferInfo = {};
     oFramebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     oFramebufferInfo.attachmentCount = uAttachmentCount;
-    oFramebufferInfo.pAttachments = &m_pRenderTarget->m_pImageViews[0];
+    oFramebufferInfo.pAttachments = &m_pRenderTarget->m_aImageViews[0];
     oFramebufferInfo.renderPass = m_pRenderTarget->m_hRenderPass;
     oFramebufferInfo.width = m_uWidth;
     oFramebufferInfo.height = m_uHeight;

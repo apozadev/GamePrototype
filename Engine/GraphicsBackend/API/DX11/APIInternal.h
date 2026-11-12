@@ -54,6 +54,6 @@ namespace api
 
   bool GetBufferByIndex(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, ID3D11ShaderReflectionConstantBuffer** ppCBuffer_, D3D11_SHADER_BUFFER_DESC& rDesc_);
 
-  uint32_t GetBindFromReflection(ID3D11ShaderReflection* _pReflection, const std::string& _sName, _D3D_SHADER_INPUT_TYPE _eInputType);
+  uint32_t GetBindFromReflection(ID3D11ShaderReflection* _pReflection, const char* _sName, _D3D_SHADER_INPUT_TYPE _eInputType);
 
 }

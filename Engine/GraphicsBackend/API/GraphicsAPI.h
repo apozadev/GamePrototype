@@ -14,6 +14,19 @@
 struct HWND__;
 typedef HWND__* HWND;
 
+struct LinearAllocator;
+
+// Memory: every Create* function takes the allocator its object lives in (and, for
+// some, small arrays it owns). Destroy* releases the API objects but never the memory:
+// that is reclaimed when the allocator is reset or rolled back, which must only
+// happen after the objects in it have been destroyed.
+//
+// Errors: no exception ever leaves these functions.
+//  - Creation and setup (Initialize, CreateAPIWindow, Create*, EndRenderTargetSetup,
+//    ResourceSetAdd*, EndResourceSetSetup, reflection getters) log and return a zero
+//    value (nullptr, false, 0) on failure: the caller fails that resource and moves on.
+//  - Everything else (drawing, presenting, destroying) treats failure as fatal.
+
 namespace api 
 { 
   // Forward declarations for opaque pointers
@@ -27,7 +40,7 @@ namespace api
 
 	// General
 
-	void Initialize();
+	bool Initialize();
 
 	void ShutDown();
 
@@ -35,7 +48,8 @@ namespace api
 
 	// Window
 
-	void CreateAPIWindow(HWND _hwnd, uint32_t _uMsaaSamples);
+	// Window-lifetime objects (e.g. the dummy texture) live in _pAllocator, which must outlive DestroyWindow
+	bool CreateAPIWindow(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples);
 
 	bool IsWindowCreated();
 
@@ -57,13 +71,13 @@ namespace api
 
 	// Mesh
 
-	Mesh* CreateMesh(const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t _uMeshConstantSize);
+	Mesh* CreateMesh(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t _uMeshConstantSize);
 
 	void DestroyMesh(Mesh* _pMesh);
 
 	// Constant buffer
 
-	ConstantBuffer* CreateConstantBuffer(size_t _uSize);
+	ConstantBuffer* CreateConstantBuffer(LinearAllocator* _pAllocator, size_t _uSize);
 
 	void UpdateConstantBuffer(ConstantBuffer* _pCBuffer, const void* _pData, size_t _uSize);	
 
@@ -71,7 +85,7 @@ namespace api
 
 	// Texture
 
-	Texture* CreateTexture(const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap);
+	Texture* CreateTexture(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap);
 
 	void GenerateMipMaps(Texture* _pTexture);
 
@@ -83,7 +97,7 @@ namespace api
 
 	// RenderTarget
 
-	RenderTarget* CreateRenderTarget();
+	RenderTarget* CreateRenderTarget(LinearAllocator* _pAllocator);
 
 	void BeginRenderTargetSetup(RenderTarget* _pRenderTarget, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, ImageFormat _eDepthStencilFormat, uint32_t _uMsaaSamples, bool _bIsCubemap);
 
@@ -93,7 +107,7 @@ namespace api
 
 	void RenderTargetAddColorResolveTexture(Texture* _pTexture);
 
-	void EndRenderTargetSetup();
+	bool EndRenderTargetSetup();
 
 	void ClearRenderTarget(RenderTarget* _pRenderTarget);
 
@@ -105,7 +119,7 @@ namespace api
 
 	// Render state
 
-	RenderState* CreateRenderState(const RenderStateInfo& _oInfo, const RenderTarget* _pRenderTarget, uint32_t _uMsaaSamples);
+	RenderState* CreateRenderState(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* _pRenderTarget, uint32_t _uMsaaSamples);
 
 	void BindRenderState(RenderState* _pRenderState);
 
@@ -117,7 +131,8 @@ namespace api
 
 	uint32_t GetTextureCount(const RenderState* _pRenderState, PipelineStage _eStage);
 
-	std::string GetConstantBufferName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx);
+	// Names point into the render state's reflection data: valid until DestroyRenderState
+	const char* GetConstantBufferName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx);
 
 	// Total size in bytes, including the API's padding rules
 	size_t GetConstantBufferSize(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx);
@@ -126,7 +141,7 @@ namespace api
 
 	uint32_t GetConstantBufferMemberCount(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx);
 
-	std::string GetConstantBufferMemberName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx);
+	const char* GetConstantBufferMemberName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx);
 
 	size_t GetConstantBufferMemberSize(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx);
 
@@ -139,15 +154,15 @@ namespace api
 
   // Resource set
 
-	ResourceSet* CreateResourceSet(RenderState* _pRenderState, uint32_t _uSetId);
+	ResourceSet* CreateResourceSet(LinearAllocator* _pAllocator, RenderState* _pRenderState, uint32_t _uSetId);
 
 	void BeginResourceSetSetup(ResourceSet* _pRenderState);
 
-	void ResourceSetAddConstantBuffer(ResourceSet* _pSubState, ConstantBuffer* _pCBuffer, size_t size, const ResourceBindInfo& _oBindInfo);
+	bool ResourceSetAddConstantBuffer(ResourceSet* _pSubState, ConstantBuffer* _pCBuffer, size_t size, const ResourceBindInfo& _oBindInfo);
 
-	void ResourceSetAddTexture(ResourceSet* _pSubState, Texture* _pTexture, const ResourceBindInfo& _oBindInfo);
+	bool ResourceSetAddTexture(ResourceSet* _pSubState, Texture* _pTexture, const ResourceBindInfo& _oBindInfo);
 
-	void EndResourceSetSetup();
+	bool EndResourceSetSetup();
 
 	void BindResourceSet(RenderState* _pRenderState, ResourceSet* _pResourceSet);
 

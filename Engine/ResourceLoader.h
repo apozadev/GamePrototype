@@ -1,14 +1,10 @@
 #pragma once
 
 #include "Vertex.h"
+#include <cstddef>
 #include <inttypes.h>
-#include <cstdlib>
-#include <string.h>
-#include <unordered_map>
-#include <queue>
-#include <condition_variable>
 
-#include "Mailbox.h"
+struct LinearAllocator;
 
 typedef uint32_t ResourceHandle;
 
@@ -32,8 +28,10 @@ enum class ResourceState
   COUNT
 };
 
+// LoadResourceAsync copies the vertex/index data into the request: the caller
+// can free or reuse its buffers as soon as the call returns.
 struct MeshLoadRequestInfo
-{  
+{
   static constexpr ResourceType eType = ResourceType::MESH;
   const void* pVertexData;
   size_t zVertexDataSize;
@@ -41,54 +39,32 @@ struct MeshLoadRequestInfo
   size_t zIndexDataSize;
 };
 
+// Filenames are copied too, they don't need to outlive the call.
 struct MaterialLoadRequestInfo
 {
   static constexpr ResourceType eType = ResourceType::MATERIAL;
-  // TODO: Lifetime. Must stay alive until the material is READY (string literals for now)
   const char* pVSFilename;
   const char* pPSFilename;
   bool bBlendEnabled;
 };
 
-struct ResourceLoadRequestBase
-{
-  ResourceHandle hHandle;
-  ResourceType eType;  
-};
+// Allocates the load request ring from _pAllocator, which must outlive the loader thread.
+// Call once from the main thread before starting the loader thread.
+void InitResourceLoader(LinearAllocator* _pAllocator);
 
-template<typename T>
-struct ResourceLoadRequest : public ResourceLoadRequestBase
-{  
-  T oRequestInfo;
-};
-
-struct ResourceEntry
-{
-  ResourceType eType;
-  ResourceState eState;
-};
-
-ResourceHandle LoadResourceAsyncInternal(ResourceLoadRequestBase* _pRequest, ResourceType _eType);
-
-template <typename T>
-ResourceHandle LoadResourceAsync(T&& _oRequestInfo)
-{
-  using Info_t = std::remove_cvref_t<T>;
-
-  static_assert(requires {
-    Info_t::eType;
-  });
-
-  ResourceLoadRequest<Info_t>* pRequest = new ResourceLoadRequest<Info_t>();
-  pRequest->eType = Info_t::eType;
-  pRequest->oRequestInfo = std::forward<T>(_oRequestInfo);
-
-  return LoadResourceAsyncInternal(pRequest, Info_t::eType);
-}
+// Update thread only (the request ring has a single producer).
+// Blocks while the request ring is full. A request too big to ever fit in the ring
+// is a fatal error (increase LOAD_REQUEST_RING_SIZE).
+ResourceHandle LoadResourceAsync(const MeshLoadRequestInfo& _oInfo);
+ResourceHandle LoadResourceAsync(const MaterialLoadRequestInfo& _oInfo);
 
 ResourceState GetResourceState(ResourceHandle _hHandle);
 
+// Called by the thread that finishes the resource (render thread for GPU resources)
 void ResourceCompletedCallback(ResourceHandle _hHandle);
+
+// Moves the resource to FAILED. It never becomes READY; the game should stop waiting on it.
+void ResourceFailedCallback(ResourceHandle _hHandle);
 
 void WorkerThreadProcessLoadRequests();
 

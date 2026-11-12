@@ -1,11 +1,9 @@
 #pragma once
 
-#include <string>
-
 #include "PipelineStage.h"
 
 struct ResourceBindInfo
 {
   PipelineStageFlags m_uStageFlags;
-  std::string m_sName;
+  const char* m_sName; // Only read during the call it is passed to
 };

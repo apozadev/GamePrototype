@@ -36,7 +36,8 @@
 #include "API/DX11/RenderTarget.h"
 #include "API/DX11/DX11BindSlotOffset.h"
 #include "API/DX11/APIInternal.h"
-#include "API/DX11/DX11Pools.h"
+#include "APIAllocation.h"
+#include "APIBoundary.h"
 
 namespace wrl = Microsoft::WRL;
 
@@ -112,32 +113,23 @@ namespace api
     
   // General
 
-  void Initialize()
+  bool Initialize()
   {
     s_oGlobalData.m_uMaxMsaaSamples = 0u;
-    s_oRenderStatePool.Initialize();
-    s_oConstantBufferPool.Initialize();
-    s_oMeshPool.Initialize();
-    s_oTexturePool.Initialize();
-    s_oRenderTargetPool.Initialize();         
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls  
+
+    return true;
   }
 
   void ShutDown()
   {
 
     ImGui::DestroyContext();
-
-    s_oRenderStatePool.Clear();
-    s_oConstantBufferPool.Clear();
-    s_oMeshPool.Clear();
-    s_oTexturePool.Clear();
-    s_oRenderTargetPool.Clear();
   }
 
   uint32_t GetMaxMsaaSamples()
@@ -147,7 +139,9 @@ namespace api
 
   // Window
 
-  void CreateAPIWindow(HWND _hwnd, uint32_t _uMsaaSamples)
+  static Texture* CreateTextureImpl(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap);
+
+  static void CreateAPIWindowImpl(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples)
   {      
 
     s_oGlobalData.m_oWindow.m_hWnd = _hwnd;
@@ -200,7 +194,8 @@ namespace api
 
     uint8_t aDummyBuffer[4] = { 255u, 20u, 0u, 255u };
     void* pDummyBuffer = &(aDummyBuffer[0]);
-    s_oGlobalData.m_oWindow.m_pDummyTexture = CreateTexture(&pDummyBuffer, 1u, 1u, ImageFormat::R8G8B8A8, 1u, 1u, TextureUsage::SHADER_RESOURCE, oSamplerCfg, false);
+    // The throwing version: a window without its dummy texture is a failed window
+    s_oGlobalData.m_oWindow.m_pDummyTexture = CreateTextureImpl(_pAllocator, &pDummyBuffer, 1u, 1u, ImageFormat::R8G8B8A8, 1u, 1u, TextureUsage::SHADER_RESOURCE, oSamplerCfg, false);
 
 #ifndef NDEBUG
     Microsoft::WRL::ComPtr<ID3D11Debug> d3dDebug;
@@ -218,6 +213,11 @@ namespace api
     filter.DenyList.pIDList = hide;
     d3dInfoQueue->AddStorageFilterEntries(&filter);
 #endif
+  }
+
+  bool CreateAPIWindow(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples)
+  {
+    return CallOrFail("CreateAPIWindow", [&] { CreateAPIWindowImpl(_pAllocator, _hwnd, _uMsaaSamples); return true; });
   }
 
   bool IsWindowCreated()
@@ -310,10 +310,11 @@ namespace api
 
   // Mesh
 
-  Mesh* CreateMesh(const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t /*_uMeshConstantSize*/)
+  static Mesh* CreateMeshImpl(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t /*_uMeshConstantSize*/)
   {
 
-    Mesh* pMesh = s_oMeshPool.PullElement();
+    Mesh* pMesh = NewObject<Mesh>(_pAllocator);
+    CreationGuard<Mesh> oGuard(pMesh);
 
     // Vertex buffer
 
@@ -358,20 +359,26 @@ namespace api
 
     ResourceSetAddConstantBuffer(g_pWindow, pMesh->m_pModelCBuffer, _uMeshConstantSize, oBindInfo);*/
 
-    return pMesh;
+    return oGuard.Release();
+  }
+
+  Mesh* CreateMesh(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t _uMeshConstantSize)
+  {
+    return CallOrFail("CreateMesh", [&] { return CreateMeshImpl(_pAllocator, _pVertexData, _uVertexDataSize, _pIndexData, _uIndexDataSize, _uMeshConstantSize); });
   }
 
   void DestroyMesh(Mesh* _pMesh)
   {
     //DestroyConstantBuffer(g_pWindow, _pMesh->m_pModelCBuffer);
-    s_oMeshPool.ReturnElement(_pMesh);
+    _pMesh->~Mesh();
   }
 
   // Constant buffer
 
-  ConstantBuffer* CreateConstantBuffer(size_t _uSize)
+  static ConstantBuffer* CreateConstantBufferImpl(LinearAllocator* _pAllocator, size_t _uSize)
   {
-    ConstantBuffer* pCBuffer = s_oConstantBufferPool.PullElement();
+    ConstantBuffer* pCBuffer = NewObject<ConstantBuffer>(_pAllocator);
+    CreationGuard<ConstantBuffer> oGuard(pCBuffer);
 
     D3D11_BUFFER_DESC oDesc = {};
     oDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -383,10 +390,15 @@ namespace api
 
     DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateBuffer(&oDesc, NULL, pCBuffer->m_pCBuffer.GetAddressOf()));
       
-    return pCBuffer;
+    return oGuard.Release();
   }
 
-  void UpdateConstantBuffer(ConstantBuffer* _pCbuffer, const void* _pData, size_t /*_uSize*/)
+  ConstantBuffer* CreateConstantBuffer(LinearAllocator* _pAllocator, size_t _uSize)
+  {
+    return CallOrFail("CreateConstantBuffer", [&] { return CreateConstantBufferImpl(_pAllocator, _uSize); });
+  }
+
+  static void UpdateConstantBufferImpl(ConstantBuffer* _pCbuffer, const void* _pData, size_t /*_uSize*/)
   {            
     /*D3D11_MAPPED_SUBRESOURCE oMsr;
     DX11_CHECK(pWindow->m_pContext->Map(_pCBuffer->m_pCBuffer.Get(), 0u, D3D11_MAP_WRITE_DISCARD, 0u, &oMsr));
@@ -399,16 +411,22 @@ namespace api
 
   }
 
+  void UpdateConstantBuffer(ConstantBuffer* _pCbuffer, const void* _pData, size_t _uSize)
+  {
+    CallOrFatal("UpdateConstantBuffer", [&] { UpdateConstantBufferImpl(_pCbuffer, _pData, _uSize); });
+  }
+
   void DestroyConstantBuffer(ConstantBuffer* _pCBuffer)
   {
-    s_oConstantBufferPool.ReturnElement(_pCBuffer);
+    _pCBuffer->~ConstantBuffer();
   }
 
   // Texture
 
-  Texture* CreateTexture(const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
+  static Texture* CreateTextureImpl(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
   {
-    Texture* pTexture = s_oTexturePool.PullElement();      
+    Texture* pTexture = NewObject<Texture>(_pAllocator);
+    CreationGuard<Texture> oGuard(pTexture);
 
     uint32_t uPixelSize = static_cast<uint32_t>(GetImageFormatSize(_eFormat));
 
@@ -534,7 +552,12 @@ namespace api
 
     s_oGlobalData.m_oWindow.m_pDevice->CreateSamplerState(&oSamplerDesc, pTexture->m_pSampler.GetAddressOf());
 
-    return pTexture;
+    return oGuard.Release();
+  }
+
+  Texture* CreateTexture(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
+  {
+    return CallOrFail("CreateTexture", [&] { return CreateTextureImpl(_pAllocator, _ppData, _uWidth, _uHeight, _eFormat, _uMipLevels, _uMsaaSamples, _uUsage, _rSamplerConfig, _bIsCubemap); });
   }
 
   void GenerateMipMaps(Texture* _pTexture)
@@ -547,7 +570,7 @@ namespace api
 
   }
 
-  void BlitTexture(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
+  static void BlitTextureImpl(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
   {
 
     if (_rSrcSubResource.m_uMipLevels != _rDstSubResource.m_uMipLevels || _rSrcSubResource.m_uLayers != _rDstSubResource.m_uLayers)
@@ -583,18 +606,21 @@ namespace api
     }
   }
 
+  void BlitTexture(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
+  {
+    CallOrFatal("BlitTexture", [&] { BlitTextureImpl(_pSrcTexture, _rSrcSubResource, _pDstTexture, _rDstSubResource); });
+  }
+
   void DestroyTexture(Texture* _pTexture)
   {
-    s_oTexturePool.ReturnElement(_pTexture);
+    _pTexture->~Texture();
   }
 
   // RenderTarget
 
-  RenderTarget* CreateRenderTarget()
+  RenderTarget* CreateRenderTarget(LinearAllocator* _pAllocator)
   {
-    RenderTarget* pRenderTarget = s_oRenderTargetPool.PullElement();
-
-    return pRenderTarget;
+    return NewObject<RenderTarget>(_pAllocator);
   }
 
   void BeginRenderTargetSetup(RenderTarget* _pRenderTarget, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, ImageFormat _eDepthStencilFormat, uint32_t _uMsaaSamples, bool _bIsCubemap)
@@ -623,10 +649,15 @@ namespace api
     s_oGlobalData.m_oRenderTargetBuilder.AddResolveColorTexture(_pTexture);
   }
 
-  void EndRenderTargetSetup()
+  static void EndRenderTargetSetupImpl()
   {
     s_oGlobalData.m_oRenderTargetBuilder.Build();
     s_oGlobalData.m_oRenderTargetBuilder.Clear();
+  }
+
+  bool EndRenderTargetSetup()
+  {
+    return CallOrFail("EndRenderTargetSetup", [&] { EndRenderTargetSetupImpl(); return true; });
   }
 
   void ClearRenderTarget(RenderTarget* _pRenderTarget)
@@ -694,8 +725,8 @@ namespace api
 
     if (_pRenderTarget->m_lstRtv.size() > 0u)
     {
-      const std::vector<ID3D11RenderTargetView*> lstNullViews(_pRenderTarget->m_lstRtv.size(), nullptr);
-      s_oGlobalData.m_oWindow.m_pContext->OMSetRenderTargets(static_cast<UINT>(_pRenderTarget->m_lstRtv.size()), lstNullViews.data(), nullptr);
+      ID3D11RenderTargetView* aNullViews[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+      s_oGlobalData.m_oWindow.m_pContext->OMSetRenderTargets(static_cast<UINT>(_pRenderTarget->m_lstRtv.size()), aNullViews, nullptr);
     }
     else
     {
@@ -705,18 +736,23 @@ namespace api
     
   void DestroyRenderTarget(RenderTarget* _pRenderTarget)
   {
-    s_oRenderTargetPool.ReturnElement(_pRenderTarget);
+    _pRenderTarget->~RenderTarget();
   }
 
   // Render state
 
-  RenderState* CreateRenderState(const RenderStateInfo& _oInfo, const RenderTarget* /*_pRenderTarget*/, uint32_t _uMsaaSamples)
+  static RenderState* CreateRenderStateImpl(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* /*_pRenderTarget*/, uint32_t _uMsaaSamples)
   {
 
-    RenderState* pRenderState = s_oRenderStatePool.PullElement();
+    RenderState* pRenderState = NewObject<RenderState>(_pAllocator);
+    CreationGuard<RenderState> oGuard(pRenderState);
 
     file::InFile oVsFile(_oInfo.m_sVSFilename.data());
     file::InFile oPsFile(_oInfo.m_sPSFilename.data());
+    if (!oVsFile.GetData() || !oPsFile.GetData())
+    {
+      THROW_GENERIC_EXCEPTION("[API] Missing shader file")
+    }
       
     DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateVertexShader(oVsFile.GetData(), oVsFile.GetSize(), nullptr, pRenderState->m_pVertexShader.ReleaseAndGetAddressOf()));            
     DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreatePixelShader(oPsFile.GetData(), oPsFile.GetSize(), nullptr, pRenderState->m_pPixelShader.ReleaseAndGetAddressOf()));      
@@ -736,6 +772,10 @@ namespace api
       sGSFilename = sGSFilename.empty() ? "" : sGSFilename.substr(uSlashPosGS, uDotPosGS - uSlashPosGS) + ".cso";
 
       file::InFile oGsFile(_oInfo.m_sGSFilename.empty() ? "" : (sGSPath + sGSFilename).c_str());
+      if (!oGsFile.GetData())
+      {
+        THROW_GENERIC_EXCEPTION("[API] Missing geometry shader file")
+      }
 
       DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateGeometryShader(oGsFile.GetData(), oGsFile.GetSize(), nullptr, pRenderState->m_pGeometryShader.ReleaseAndGetAddressOf()));
 
@@ -804,7 +844,12 @@ namespace api
 
     DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateDepthStencilState(&oDSDesc, pRenderState->m_pDSState.GetAddressOf()));
 
-    return pRenderState;
+    return oGuard.Release();
+  }
+
+  RenderState* CreateRenderState(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* _pRenderTarget, uint32_t _uMsaaSamples)
+  {
+    return CallOrFail("CreateRenderState", [&] { return CreateRenderStateImpl(_pAllocator, _oInfo, _pRenderTarget, _uMsaaSamples); });
   }
 
   void BeginRenderStateSetup(RenderState* /*_pRenderState*/)
@@ -828,7 +873,7 @@ namespace api
 
   void DestroyRenderState(RenderState* _pRenderState)
   {
-    s_oRenderStatePool.ReturnElement(_pRenderState);
+    _pRenderState->~RenderState();
   }
 
   // Shader Reflection
@@ -918,7 +963,7 @@ namespace api
     return uTextureCount;
   }
 
-  std::string GetConstantBufferName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  const char* GetConstantBufferName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx)
   {
     D3D11_SHADER_BUFFER_DESC oDesc{};
       
@@ -950,7 +995,7 @@ namespace api
     return 0u;
   }
 
-  std::string GetConstantBufferMemberName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  const char* GetConstantBufferMemberName(const RenderState* _pRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
     D3D11_SHADER_BUFFER_DESC oBufferDesc = {};
 
@@ -1121,9 +1166,9 @@ namespace api
 
   // Render substate
 
-  ResourceSet* CreateResourceSet(RenderState* _pRenderState, uint32_t /*_uSetId*/)
+  ResourceSet* CreateResourceSet(LinearAllocator* _pAllocator, RenderState* _pRenderState, uint32_t /*_uSetId*/)
   {
-    ResourceSet* pResourceSet = new ResourceSet();
+    ResourceSet* pResourceSet = NewObject<ResourceSet>(_pAllocator);
     pResourceSet->m_pRenderState = _pRenderState;
     return pResourceSet;
   }
@@ -1134,7 +1179,7 @@ namespace api
     memset(_pSubState->m_lstCBuffers, 0, sizeof(_pSubState->m_lstCBuffers));
   }
 
-  void ResourceSetAddConstantBuffer(ResourceSet* _pSubState, ConstantBuffer* _pCBuffer, size_t /*_uSize*/, const ResourceBindInfo& _oBindInfo)
+  bool ResourceSetAddConstantBuffer(ResourceSet* _pSubState, ConstantBuffer* _pCBuffer, size_t /*_uSize*/, const ResourceBindInfo& _oBindInfo)
   {           
     // Only one binding per cbuffer, so must be the same for all stages
     uint32_t uBinding = INVALID_BINDING_SLOT;
@@ -1165,14 +1210,14 @@ namespace api
       rCBufferBinding.m_pConstantBuffer = _pCBuffer;
 
       _pSubState->m_uCBufferBindingCount++;
-    }      
-    else
-    {
-      THROW_GENERIC_EXCEPTION("[API] Cbuffer name not found")
+      return true;
     }
+
+    LogError("[API] Cbuffer '%s' not found in the shaders", _oBindInfo.m_sName);
+    return false;
   }
 
-  void ResourceSetAddTexture(ResourceSet* _pSubState, Texture* _pTexture, const ResourceBindInfo& _oBindInfo)
+  bool ResourceSetAddTexture(ResourceSet* _pSubState, Texture* _pTexture, const ResourceBindInfo& _oBindInfo)
   {
 
     // Only one binding per texture, so must be the same for all stages
@@ -1204,16 +1249,16 @@ namespace api
       rTextureBinding.m_pTexture = _pTexture;
 
       _pSubState->m_uTextureBindingCount++;
+      return true;
     }
-    else
-    {
-      THROW_GENERIC_EXCEPTION("[API] Texture name not found")
-    }    
 
+    LogError("[API] Texture '%s' not found in the shaders", _oBindInfo.m_sName);
+    return false;
   }
 
-  void EndResourceSetSetup()
+  bool EndResourceSetSetup()
   {
+    return true;
   }
 
   void BindResourceSet(RenderState* /*_pRenderState*/, ResourceSet* _pResourceSet)
@@ -1263,7 +1308,7 @@ namespace api
 
   void DestroyResourceSet(ResourceSet* _pResourceSet)
   {
-    delete _pResourceSet;
+    _pResourceSet->~ResourceSet();
   }
 
   // Drawing
@@ -1273,7 +1318,7 @@ namespace api
     // We dont really need this feature, I think. DX11 should manage synchronization automatically
   }
 
-  int BeginDraw()
+  static int BeginDrawImpl()
   {
     if (s_oGlobalData.m_oWindow.m_bResize)
     {
@@ -1302,6 +1347,11 @@ namespace api
     return 0;
   }
 
+  int BeginDraw()
+  {
+    return CallOrFatal("BeginDraw", [&] { return BeginDrawImpl(); });
+  }
+
   void BeginDrawOffline()
   {    
   }
@@ -1326,7 +1376,7 @@ namespace api
     // Nothing to do...
   }
 
-  void Present()
+  static void PresentImpl()
   {
     if (s_oGlobalData.m_oWindow.m_pColorTexture)
     {
@@ -1339,6 +1389,11 @@ namespace api
     }
 
     DX11_CHECK(s_oGlobalData.m_oWindow.m_pSwapchain->Present(1u, 0u))
+  }
+
+  void Present()
+  {
+    CallOrFatal("Present", [&] { PresentImpl(); });
   }
 
   // Misc

@@ -28,7 +28,7 @@ namespace api
 
     bool Contains(VkDescriptorSetLayoutBinding _oBinding) const;
 
-    uint32_t FindBinding(const std::string& _sName, VkPipelineStageFlags _uStageFlags, VkDescriptorType _eType) const;
+    uint32_t FindBinding(const char* _sName, VkPipelineStageFlags _uStageFlags, VkDescriptorType _eType) const;
 
     void Clear() { m_lstDescriptors.clear();}
 

@@ -1,6 +1,5 @@
 #include "API/Vulkan/VulkanShaderReflection.h"
 #include "API/Vulkan/DescriptorUtils.h"
-#include "API/Vulkan/VulkanPools.h"
 
 #include "Exception.h"
 

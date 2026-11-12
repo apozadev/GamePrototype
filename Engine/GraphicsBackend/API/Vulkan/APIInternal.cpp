@@ -7,7 +7,12 @@
 #include "TextureUsage.h"
 #include "API/Vulkan/VulkanMacros.h"
 #include "API/Vulkan/VulkanShaderReflection.h"
-#include "API/Vulkan/VulkanPools.h"
+#include "API/Vulkan/RenderState.h"
+#include "API/Vulkan/ResourceSet.h"
+#include "API/Vulkan/ConstantBuffer.h"
+#include "API/Vulkan/Mesh.h"
+#include "API/Vulkan/Texture.h"
+#include "API/Vulkan/RenderTarget.h"
 
 namespace api
 {
@@ -555,18 +560,23 @@ void CreatePipeline(
 
   // Blending
 
-  VkPipelineColorBlendAttachmentState* pBlendAttachments = s_oPipelineColorBlendAttachmentPool.PullElements(_uAttachmentCount);
+  if (_uAttachmentCount > MAX_RENDER_TARGET_COLOR_ATTACHMENTS)
+  {
+    THROW_GENERIC_EXCEPTION("[API] Too many color attachments for a pipeline")
+  }
+
+  VkPipelineColorBlendAttachmentState aBlendAttachments[MAX_RENDER_TARGET_COLOR_ATTACHMENTS] = {};
   
   for (uint32_t i = 0u; i < _uAttachmentCount; i++)
   {
-    pBlendAttachments[i].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    pBlendAttachments[i].blendEnable = _oInfo.m_bBlendEnabled ? VK_TRUE : VK_FALSE;
-    pBlendAttachments[i].srcColorBlendFactor = GetVkBlendFactor(_oInfo.m_eSrcBlendFactor);
-    pBlendAttachments[i].dstColorBlendFactor = GetVkBlendFactor(_oInfo.m_eDstBlendFactor);
-    pBlendAttachments[i].colorBlendOp = GetVkBlendOp(_oInfo.m_eBlendOp);
-    pBlendAttachments[i].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    pBlendAttachments[i].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-    pBlendAttachments[i].alphaBlendOp = VK_BLEND_OP_ADD;
+    aBlendAttachments[i].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    aBlendAttachments[i].blendEnable = _oInfo.m_bBlendEnabled ? VK_TRUE : VK_FALSE;
+    aBlendAttachments[i].srcColorBlendFactor = GetVkBlendFactor(_oInfo.m_eSrcBlendFactor);
+    aBlendAttachments[i].dstColorBlendFactor = GetVkBlendFactor(_oInfo.m_eDstBlendFactor);
+    aBlendAttachments[i].colorBlendOp = GetVkBlendOp(_oInfo.m_eBlendOp);
+    aBlendAttachments[i].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    aBlendAttachments[i].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    aBlendAttachments[i].alphaBlendOp = VK_BLEND_OP_ADD;
   }
 
   VkPipelineColorBlendStateCreateInfo oColorBlending{};
@@ -574,7 +584,7 @@ void CreatePipeline(
   oColorBlending.logicOpEnable = VK_FALSE;
   oColorBlending.logicOp = VK_LOGIC_OP_COPY; // Optional
   oColorBlending.attachmentCount = _uAttachmentCount;
-  oColorBlending.pAttachments = pBlendAttachments;
+  oColorBlending.pAttachments = aBlendAttachments;
   oColorBlending.blendConstants[0] = 0.0f; // Optional
   oColorBlending.blendConstants[1] = 0.0f; // Optional
   oColorBlending.blendConstants[2] = 0.0f; // Optional
@@ -638,7 +648,6 @@ void CreatePipeline(
     vkDestroyShaderModule(s_oGlobalData.m_oWindow.m_hDevice, hGSShaderModule, NULL);
   }
 
-  if(pBlendAttachments != nullptr) s_oPipelineColorBlendAttachmentPool.ReturnElements(pBlendAttachments);
 }
 
 void CreateLogicalDevice()
@@ -1044,18 +1053,23 @@ void CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool 
   }
 
 
-  VkAttachmentReference* pColorAttachmentRefs = s_oVkAttachmentReferencePool.PullElements(_uNumColorTextures);
-  VkAttachmentReference* pColorResolveAttachmentRefs = s_oVkAttachmentReferencePool.PullElements(_uNumColorTextures);
+  if (_uNumColorTextures > MAX_RENDER_TARGET_COLOR_ATTACHMENTS)
+  {
+    THROW_GENERIC_EXCEPTION("[API] Too many color attachments for a render pass")
+  }
+
+  VkAttachmentReference aColorAttachmentRefs[MAX_RENDER_TARGET_COLOR_ATTACHMENTS] = {};
+  VkAttachmentReference aColorResolveAttachmentRefs[MAX_RENDER_TARGET_COLOR_ATTACHMENTS] = {};
 
   for (uint32_t i = 0; i < _uNumColorTextures; i++)
   {
-    pColorAttachmentRefs[i] = {};
-    pColorAttachmentRefs[i].attachment = i;
-    pColorAttachmentRefs[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    aColorAttachmentRefs[i] = {};
+    aColorAttachmentRefs[i].attachment = i;
+    aColorAttachmentRefs[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    pColorResolveAttachmentRefs[i] = {};
-    pColorResolveAttachmentRefs[i].attachment = i + _uNumColorTextures;
-    pColorResolveAttachmentRefs[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    aColorResolveAttachmentRefs[i] = {};
+    aColorResolveAttachmentRefs[i].attachment = i + _uNumColorTextures;
+    aColorResolveAttachmentRefs[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   }
 
   VkAttachmentReference oDepthAttachmentRef{};
@@ -1065,9 +1079,9 @@ void CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool 
   VkSubpassDescription oSubpassDesc{};
   oSubpassDesc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
   oSubpassDesc.colorAttachmentCount = _uNumColorTextures;
-  oSubpassDesc.pColorAttachments = pColorAttachmentRefs;
+  oSubpassDesc.pColorAttachments = aColorAttachmentRefs;
   oSubpassDesc.pDepthStencilAttachment = _bHasDepthStencil ? &oDepthAttachmentRef : nullptr;
-  oSubpassDesc.pResolveAttachments = bHasMsaa ? pColorResolveAttachmentRefs : nullptr;
+  oSubpassDesc.pResolveAttachments = bHasMsaa ? aColorResolveAttachmentRefs : nullptr;
 
   VkSubpassDependency oSubpassDependency{};
   oSubpassDependency.srcSubpass = VK_SUBPASS_EXTERNAL;
@@ -1079,26 +1093,26 @@ void CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool 
 
   const uint32_t uNumAttachments = _uNumColorTextures + (bHasMsaa ? _uNumColorTextures : 0u) + (_bHasDepthStencil ? 1u : 0u);
 
-  VkAttachmentDescription* pAttachments = s_oVkAttachmentDescriptionPool.PullElements(uNumAttachments);
+  VkAttachmentDescription aAttachments[MAX_RENDER_TARGET_ATTACHMENTS] = {};
 
   uint32_t uAttachmentIdx = 0u;
 
   for (int i = 0; i < _uNumColorTextures; i++)
   {
-    pAttachments[uAttachmentIdx++] = oColorAttachmentDesc;
+    aAttachments[uAttachmentIdx++] = oColorAttachmentDesc;
   }
 
   if (bHasMsaa)
   {
     for (int i = 0; i < _uNumColorTextures; i++)
     {
-      pAttachments[uAttachmentIdx++] = oColorResolveAttachmentDesc;
+      aAttachments[uAttachmentIdx++] = oColorResolveAttachmentDesc;
     }
   }
 
   if (_bHasDepthStencil)
   {
-    pAttachments[uAttachmentIdx++] = oDepthAttachmentDesc;
+    aAttachments[uAttachmentIdx++] = oDepthAttachmentDesc;
   }
 
   /*
@@ -1123,7 +1137,7 @@ void CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool 
   VkRenderPassCreateInfo oRenderPassCreateInfo{};
   oRenderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
   oRenderPassCreateInfo.attachmentCount = uNumAttachments;
-  oRenderPassCreateInfo.pAttachments = pAttachments;
+  oRenderPassCreateInfo.pAttachments = aAttachments;
   oRenderPassCreateInfo.subpassCount = 1u;
   oRenderPassCreateInfo.pSubpasses = &oSubpassDesc;
   oRenderPassCreateInfo.dependencyCount = 1u;
@@ -1136,9 +1150,6 @@ void CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool 
 
   VK_CHECK(vkCreateRenderPass(s_oGlobalData.m_oWindow.m_hDevice, &oRenderPassCreateInfo, NULL, &hRenderPass_))
 
-  if(pAttachments) s_oVkAttachmentDescriptionPool.ReturnElements(pAttachments);
-  if(pColorAttachmentRefs) s_oVkAttachmentReferencePool.ReturnElements(pColorAttachmentRefs);
-  if(pColorResolveAttachmentRefs) s_oVkAttachmentReferencePool.ReturnElements(pColorResolveAttachmentRefs);
 
 }
 

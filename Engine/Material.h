@@ -5,28 +5,33 @@
 // A material is a render state plus every constant buffer its shaders declare,
 // discovered through shader reflection. Properties are addressed by name, so
 // no C++ struct has to mirror the shader's cbuffer layout.
+//
+// Plain data: a material and everything it owns (names, CPU cbuffer copies,
+// API objects) live in the allocator passed to CreateMaterial.
 
 #include <cstdint>
-#include <string>
-#include <vector>
 
 #include "API/GraphicsAPI.h"
 
+struct LinearAllocator;
+
 struct MaterialProperty
 {
-  std::string sName; // Kept for debugging, lookups use uNameHash
-  uint32_t uNameHash;
-  uint32_t uOffset;  // Bytes from the start of the cbuffer, as packed by the shader compiler
-  uint32_t uSize;
+  const char* sName = nullptr; // Kept for debugging, lookups use uNameHash
+  uint32_t uNameHash = 0u;
+  uint32_t uOffset = 0u;  // Bytes from the start of the cbuffer, as packed by the shader compiler
+  uint32_t uSize = 0u;
 };
 
 struct MaterialConstantBuffer
 {
-  std::string sName;
+  const char* sName = nullptr;
   PipelineStageFlags uStageFlags = STAGE_NONE;
   api::ConstantBuffer* pCBuffer = nullptr;
-  std::vector<uint8_t> lstData; // CPU copy, uploaded to pCBuffer when dirty
-  std::vector<MaterialProperty> lstProperties;
+  uint8_t* pData = nullptr; // CPU copy, uploaded to pCBuffer when dirty
+  uint32_t uDataSize = 0u;
+  MaterialProperty* pProperties = nullptr;
+  uint32_t uPropertyCount = 0u;
   bool bDirty = true;
 };
 
@@ -35,11 +40,15 @@ struct Material
   api::RenderState* pRenderState = nullptr;
   // TODO: Resource sets are a Vulkan concept leaking through the API
   api::ResourceSet* pResourceSet = nullptr;
-  std::vector<MaterialConstantBuffer> lstCBuffers;
+  MaterialConstantBuffer* pCBuffers = nullptr;
+  uint32_t uCBufferCount = 0u;
 };
 
-Material* CreateMaterial(const RenderStateInfo& _oInfo);
+// Allocates everything from _pAllocator. If creation fails, whatever was created is
+// destroyed, _pAllocator is rolled back to where it was, and it returns nullptr.
+Material* CreateMaterial(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo);
 
+// Releases the API objects. The memory goes back when its allocator is reset or rolled back.
 void DestroyMaterial(Material* _pMaterial);
 
 // Writes the value into every cbuffer of the material that declares the property.

@@ -1,6 +1,7 @@
 #include "API/DX11/APIInternal.h"
 
 #include <dxgidebug.h>
+#include <cstring>
 
 #include "Exception.h"
 #include "TextureUsage.h"
@@ -514,7 +515,7 @@ namespace api
     return false;
   }
 
-  uint32_t GetBindFromReflection(ID3D11ShaderReflection* _pReflection, const std::string& _sName, _D3D_SHADER_INPUT_TYPE _eInputType)
+  uint32_t GetBindFromReflection(ID3D11ShaderReflection* _pReflection, const char* _sName, _D3D_SHADER_INPUT_TYPE _eInputType)
   {
     D3D11_SHADER_DESC oShaderDesc;
     DX11_CHECK(_pReflection->GetDesc(&oShaderDesc))
@@ -524,7 +525,7 @@ namespace api
       D3D11_SHADER_INPUT_BIND_DESC oBindDesc;
       _pReflection->GetResourceBindingDesc(i, &oBindDesc);
 
-      if (oBindDesc.Type == _eInputType && _sName == oBindDesc.Name)
+      if (oBindDesc.Type == _eInputType && strcmp(_sName, oBindDesc.Name) == 0)
       {
         return oBindDesc.BindPoint;        
       }

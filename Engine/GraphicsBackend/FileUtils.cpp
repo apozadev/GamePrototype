@@ -4,7 +4,7 @@
 #include <Windows.h>
 
 #include "FileUtils.h"
-#include "Exception.h"
+#include "Log.h"
 
 namespace file
 {
@@ -22,9 +22,13 @@ namespace file
 
     std::ifstream oFile(sFullPath.c_str(), std::ios::ate | std::ios::binary);
 
+    uSize_ = 0u;
+
     if (!oFile.is_open())
-    {            
-      //THROW_GENERIC_EXCEPTION((std::string("failed to open file: ") + _sFilename).c_str())
+    {
+      // Without this, tellg() returns -1 and we read garbage into a huge malloc
+      LogError("Failed to open file: %s", _sFilename);
+      return nullptr;
     }
 
     uSize_ = (size_t)oFile.tellg();

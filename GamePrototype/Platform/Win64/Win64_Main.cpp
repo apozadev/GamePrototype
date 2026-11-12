@@ -1,14 +1,26 @@
 #include <windows.h>
 #include <stdint.h>
+#include <string.h>
 #include <thread>
 
 #include "API/GraphicsAPI.h"
+#include "Asserts.h"
+#include "Memory/ThreadArenas.h"
+#include "Platform/Debug.h"
 #include "Renderer.h"
 #include "ResourceLoader.h"
 
 #include "../../Game.h"
 
 static bool g_bRunning = true;
+
+// The main thread outlives the render and loader threads, so its global arena
+// also holds the memory they share (the load and create request rings).
+static constexpr ThreadArenasConfig g_oMainThreadArenasConfig = {
+  /*zGlobalSize=*/ 24u * 1024u * 1024u,
+  /*zSceneSize=*/  16u * 1024u * 1024u,
+  /*zFrameSize=*/  4u * 1024u * 1024u, // Reset before every Game_Update
+};
 
 static constexpr int g_iBackBufferWidth = 1280;
 static constexpr int g_iBackBufferHeight = 720;
@@ -87,7 +99,7 @@ LRESULT WndProc(
     if (uVKCode == VK_RIGHT)
     {
     }
-    if (uVKCode == VK_UP)
+    if (uVKCode == VK_LEFT)
     {
     }
     if (uVKCode == VK_ESCAPE)
@@ -117,6 +129,31 @@ int WINAPI WinMain(
   int
 )
 {
+  // Assets are loaded relative to the executable, not to wherever it was launched from
+  // (the VS debugger, for one, starts it in the build directory).
+  {
+    char aExePath[MAX_PATH];
+    DWORD uLen = GetModuleFileNameA(NULL, aExePath, MAX_PATH);
+    if (uLen > 0 && uLen < MAX_PATH)
+    {
+      char* pLastSlash = strrchr(aExePath, '\\');
+      if (pLastSlash)
+      {
+        *pLastSlash = '\0';
+        SetCurrentDirectoryA(aExePath);
+      }
+    }
+  }
+
+  // Before anything else: an escaped exception becomes a fatal error with a message.
+  // The render and loader threads install their own.
+  platform::InstallFatalErrorHandlersForThread();
+
+  ThreadArenas* pArenas = CreateThreadArenas(g_oMainThreadArenasConfig);
+
+  // Before any thread that uses them starts
+  InitRenderer(&pArenas->oGlobal);
+  InitResourceLoader(&pArenas->oGlobal);
 
   WNDCLASS oWndClass = {};
   oWndClass.style = CS_HREDRAW | CS_VREDRAW;
@@ -131,10 +168,8 @@ int WINAPI WinMain(
   oWndClass.lpszClassName = "GamePrototypeWndClass";
 
 
-  if (!RegisterClass(&oWndClass))
-  {
-    // ERROR: Window Class register failed
-  }
+  const ATOM uWndClass = RegisterClass(&oWndClass);
+  FATAL_ASSERT_MSG_FORMAT(uWndClass != 0, "RegisterClass failed (error %lu)", GetLastError());
 
   HWND hWnd = CreateWindowEx(0,
     oWndClass.lpszClassName,
@@ -149,21 +184,20 @@ int WINAPI WinMain(
     hInstance,
     NULL);
 
-  if (!hWnd)
-  {
-    // ERROR: Window creation failed
-  } 
+  FATAL_ASSERT_MSG_FORMAT(hWnd != NULL, "CreateWindowEx failed (error %lu)", GetLastError()); 
 
-  api::Initialize();
+  const bool bAPIInitialized = api::Initialize();
+  FATAL_ASSERT_MSG(bAPIInitialized, "Graphics API initialization failed (see log)");
 
-  api::CreateAPIWindow(hWnd, /*msaa=*/1);
+  const bool bWindowCreated = api::CreateAPIWindow(&pArenas->oGlobal, hWnd, /*msaa=*/1);
+  FATAL_ASSERT_MSG(bWindowCreated, "Graphics API window creation failed (see log)");
 
   // From here on, only the render thread touches the graphics API
   // (until it is joined below).
   std::thread oRenderThread(RenderThreadFnc);
   std::thread oLoaderThread(WorkerThreadProcessLoadRequests);
 
-  Game_Init();
+  Game_Init(pArenas);
 
   LARGE_INTEGER ilPerfFrequency;
   QueryPerformanceFrequency(&ilPerfFrequency);
@@ -182,7 +216,8 @@ int WINAPI WinMain(
       DispatchMessage(&msg);
     }
     
-    Game_Update(g_fDeltaTime);
+    pArenas->oFrame.Reset();
+    Game_Update(pArenas, g_fDeltaTime);
 
     Sleep(16);     // just to slow down the loop a bit, not required            
     
@@ -214,7 +249,7 @@ int WINAPI WinMain(
   }
 
   // cleanup
-  Game_Shutdown();
+  Game_Shutdown(pArenas);
 
   RequestLoaderThreadExit();
   oLoaderThread.join();
@@ -225,6 +260,9 @@ int WINAPI WinMain(
   // Render thread is gone, the main thread owns the API again
   api::DestroyWindow();
   api::ShutDown();
+
+  // Both threads are joined: nothing references the request rings anymore
+  DestroyThreadArenas(pArenas);
 
   return 0;
 }

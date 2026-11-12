@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <optional>
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
@@ -20,7 +21,9 @@
 #include "API/Vulkan/APIInternal.h"
 #include "API/Vulkan/VulkanMacros.h"
 #include "API/Vulkan/VulkanShaderReflection.h"
-#include "API/Vulkan/VulkanPools.h"
+#include "APIAllocation.h"
+#include "APIBoundary.h"
+#include "Log.h"
 #include "API/Vulkan/ResourceLayout.h"
 #include "InFile.h"
 
@@ -29,24 +32,8 @@ namespace api
 
   // General
 
-  void Initialize()
+  static void InitializeImpl()
   {
-
-    s_oRenderStatePool.Initialize();
-    s_oResourceSetPool.Initialize();
-    s_oConstantBufferPool.Initialize();
-    s_oMeshPool.Initialize();
-    s_oTexturePool.Initialize();
-    s_oRenderTargetPool.Initialize();
-
-    s_oVkBufferPool.Initialize();
-    s_oVkDeviceMemoryPool.Initialize();
-    s_oVoidPtrPool.Initialize();
-    s_oVkDescriptorSetPool.Initialize();
-    s_oVkAttachmentReferencePool.Initialize();
-    s_oVkAttachmentDescriptionPool.Initialize();
-    s_oVkImageViewPool.Initialize();
-    s_oPipelineColorBlendAttachmentPool.Initialize();
 
     CreateInstance();
     CreatePhysicalDevice();    
@@ -58,22 +45,13 @@ namespace api
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls    
   }
 
+  bool Initialize()
+  {
+    return CallOrFail("Initialize", [&] { InitializeImpl(); return true; });
+  }
+
   void ShutDown()
   {        
-
-    s_oRenderStatePool.Clear();
-    s_oResourceSetPool.Clear();
-    s_oConstantBufferPool.Clear();
-    s_oMeshPool.Clear();
-    s_oTexturePool.Clear();
-    s_oRenderTargetPool.Clear();
-
-    s_oVkBufferPool.Clear();
-    s_oVkDeviceMemoryPool.Clear();
-    s_oVoidPtrPool.Clear();
-    s_oVkDescriptorSetPool.Clear();
-    s_oVkAttachmentReferencePool.Clear();
-    s_oVkAttachmentDescriptionPool.Clear();
 
     vkDestroyInstance(s_oGlobalData.m_hInstance, NULL);
   }
@@ -85,7 +63,9 @@ namespace api
 
   // Window
 
-  void CreateAPIWindow(HWND _hwnd, uint32_t _uMsaaSamples)
+  static Texture* CreateTextureImpl(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap);
+
+  static void CreateAPIWindowImpl(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples)
   {
     bool bMsaa = _uMsaaSamples > 1u;
 
@@ -147,10 +127,16 @@ namespace api
     SamplerConfig oDummySamplerConfig = {};
     uint8_t aDummyBuffer[4] = { 255u, 20u, 0u, 255u};    
     void* pDummyBuffer = &(aDummyBuffer[0]);
-    s_oGlobalData.m_oWindow.m_pDummyTexture = CreateTexture(&pDummyBuffer, 1u, 1u, ImageFormat::R8G8B8A8, 1u, 1u, TextureUsage::SHADER_RESOURCE, oDummySamplerConfig, false);
+    // The throwing version: a window without its dummy texture is a failed window
+    s_oGlobalData.m_oWindow.m_pDummyTexture = CreateTextureImpl(_pAllocator, &pDummyBuffer, 1u, 1u, ImageFormat::R8G8B8A8, 1u, 1u, TextureUsage::SHADER_RESOURCE, oDummySamplerConfig, false);
 
     // ImGui stuff
     SetupImGui();
+  }
+
+  bool CreateAPIWindow(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples)
+  {
+    return CallOrFail("CreateAPIWindow", [&] { CreateAPIWindowImpl(_pAllocator, _hwnd, _uMsaaSamples); return true; });
   }
 
   bool IsWindowCreated()
@@ -325,7 +311,7 @@ namespace api
     vkCmdEndRenderPass(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx]);    
   }
 
-  void DestroyWindow()
+  static void DestroyWindowImpl()
   {
 
     ImGui_ImplVulkan_Shutdown();
@@ -369,11 +355,16 @@ namespace api
     vkDestroyDevice(s_oGlobalData.m_oWindow.m_hDevice, NULL); 
   }
 
+  void DestroyWindow()
+  {
+    CallOrFatal("DestroyWindow", [&] { DestroyWindowImpl(); });
+  }
+
   // Mesh
 
-  Mesh* CreateMesh( const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t /*_uMeshConstantSize*/)
+  static Mesh* CreateMeshImpl(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t /*_uMeshConstantSize*/)
   {
-    Mesh* pMesh = s_oMeshPool.PullElement();
+    Mesh* pMesh = NewObject<Mesh>(_pAllocator);
 
     VkCommandBuffer hCmdBuffer = BeginTempCmdBuffer();
 
@@ -424,7 +415,12 @@ namespace api
     return pMesh;
   }
 
-  void DestroyMesh(Mesh* _pMesh)
+  Mesh* CreateMesh(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t _uMeshConstantSize)
+  {
+    return CallOrFail("CreateMesh", [&] { return CreateMeshImpl(_pAllocator, _pVertexData, _uVertexDataSize, _pIndexData, _uIndexDataSize, _uMeshConstantSize); });
+  }
+
+  static void DestroyMeshImpl(Mesh* _pMesh)
   {
 
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
@@ -434,22 +430,27 @@ namespace api
     DestroyBuffer(_pMesh->m_hVertexBuffer, _pMesh->m_hVertexBufferMemory);
     DestroyBuffer(_pMesh->m_hIndexBuffer, _pMesh->m_hIndexBufferMemory);
 
-    s_oMeshPool.ReturnElement(_pMesh);
+    _pMesh->~Mesh();
+  }
+
+  void DestroyMesh(Mesh* _pMesh)
+  {
+    CallOrFatal("DestroyMesh", [&] { DestroyMeshImpl(_pMesh); });
   }
 
   // Constant buffer
 
-  ConstantBuffer* CreateConstantBuffer(size_t _uSize)
+  static ConstantBuffer* CreateConstantBufferImpl(LinearAllocator* _pAllocator, size_t _uSize)
   {
-    ConstantBuffer* pCBuffer = s_oConstantBufferPool.PullElement();        
+    ConstantBuffer* pCBuffer = NewObject<ConstantBuffer>(_pAllocator);
     
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
     // Create buffers
 
-    pCBuffer->m_pUniformBuffers = s_oVkBufferPool.PullElements(uNumImages);
-    pCBuffer->m_pUniformBuffersMemory = s_oVkDeviceMemoryPool.PullElements(uNumImages);
-    pCBuffer->m_pUniformBuffersMapped = s_oVoidPtrPool.PullElements(uNumImages);
+    pCBuffer->m_pUniformBuffers = NewArray<VkBuffer>(_pAllocator, uNumImages);
+    pCBuffer->m_pUniformBuffersMemory = NewArray<VkDeviceMemory>(_pAllocator, uNumImages);
+    pCBuffer->m_pUniformBuffersMapped = NewArray<void*>(_pAllocator, uNumImages);
 
     for (uint32_t i = 0; i < uNumImages; i++)
     {
@@ -463,6 +464,11 @@ namespace api
     }
 
     return pCBuffer;
+  }
+
+  ConstantBuffer* CreateConstantBuffer(LinearAllocator* _pAllocator, size_t _uSize)
+  {
+    return CallOrFail("CreateConstantBuffer", [&] { return CreateConstantBufferImpl(_pAllocator, _uSize); });
   }
 
   void UpdateConstantBuffer(ConstantBuffer* _pCBuffer, const void* _pData, size_t _uSize)
@@ -480,7 +486,7 @@ namespace api
     }
   }
 
-  void DestroyConstantBuffer(ConstantBuffer* _pCBuffer)
+  static void DestroyConstantBufferImpl(ConstantBuffer* _pCBuffer)
   {       
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
@@ -492,19 +498,21 @@ namespace api
       DestroyBuffer(_pCBuffer->m_pUniformBuffers[i], _pCBuffer->m_pUniformBuffersMemory[i]);
     }
 
-    s_oVkBufferPool.ReturnElements(_pCBuffer->m_pUniformBuffers);
-    s_oVkDeviceMemoryPool.ReturnElements(_pCBuffer->m_pUniformBuffersMemory);
-    s_oVoidPtrPool.ReturnElements(_pCBuffer->m_pUniformBuffersMapped);
+    // The per-image arrays live in the same allocator as the cbuffer and are reclaimed with it
+    _pCBuffer->~ConstantBuffer();
+  }
 
-    s_oConstantBufferPool.ReturnElement(_pCBuffer);
+  void DestroyConstantBuffer(ConstantBuffer* _pCBuffer)
+  {
+    CallOrFatal("DestroyConstantBuffer", [&] { DestroyConstantBufferImpl(_pCBuffer); });
   }
 
   // Texture
 
-  Texture* CreateTexture(const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
+  static Texture* CreateTextureImpl(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
   {
 
-    Texture* pTexture = s_oTexturePool.PullElement();
+    Texture* pTexture = NewObject<Texture>(_pAllocator);
 
     VkBuffer hStagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory hStagingBufferMemory;       
@@ -675,6 +683,11 @@ namespace api
     return pTexture;
   }
 
+  Texture* CreateTexture(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
+  {
+    return CallOrFail("CreateTexture", [&] { return CreateTextureImpl(_pAllocator, _ppData, _uWidth, _uHeight, _eFormat, _uMipLevels, _uMsaaSamples, _uUsage, _rSamplerConfig, _bIsCubemap); });
+  }
+
   void GenerateMipMaps(Texture* _pTexture)
   {
     if (_pTexture->m_uMipLevels > 1u)
@@ -712,7 +725,7 @@ namespace api
 
   }
 
-  void ClearTexture(Texture* _pTexture, TextureUsage _eUsage)
+  static void ClearTextureImpl(Texture* _pTexture, TextureUsage _eUsage)
   {    
 
     uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
@@ -781,7 +794,12 @@ namespace api
       eFinalLayout);    
   }
 
-  void BlitTexture(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
+  void ClearTexture(Texture* _pTexture, TextureUsage _eUsage)
+  {
+    CallOrFatal("ClearTexture", [&] { ClearTextureImpl(_pTexture, _eUsage); });
+  }
+
+  static void BlitTextureImpl(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
   {    
 
     if (_rSrcSubResource.m_uMipLevels != _rDstSubResource.m_uMipLevels || _rSrcSubResource.m_uLayers != _rDstSubResource.m_uLayers)
@@ -861,7 +879,12 @@ namespace api
       , eDstOldLayout);
   }
 
-  void DestroyTexture(Texture* _pTexture)
+  void BlitTexture(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
+  {
+    CallOrFatal("BlitTexture", [&] { BlitTextureImpl(_pSrcTexture, _rSrcSubResource, _pDstTexture, _rDstSubResource); });
+  }
+
+  static void DestroyTextureImpl(Texture* _pTexture)
   {
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
@@ -872,14 +895,19 @@ namespace api
     vkDestroyImage(s_oGlobalData.m_oWindow.m_hDevice, _pTexture->m_hImage, NULL);
     vkFreeMemory(s_oGlobalData.m_oWindow.m_hDevice, _pTexture->m_hMemory, NULL);
 
-    s_oTexturePool.ReturnElement(_pTexture);
+    _pTexture->~Texture();
+  }
+
+  void DestroyTexture(Texture* _pTexture)
+  {
+    CallOrFatal("DestroyTexture", [&] { DestroyTextureImpl(_pTexture); });
   }
 
   // RenderTarget
 
-  RenderTarget* CreateRenderTarget()
+  RenderTarget* CreateRenderTarget(LinearAllocator* _pAllocator)
   {
-    RenderTarget* pRenderTarget = s_oRenderTargetPool.PullElement();    
+    RenderTarget* pRenderTarget = NewObject<RenderTarget>(_pAllocator);    
 
     return pRenderTarget;
   }
@@ -909,10 +937,15 @@ namespace api
     s_oGlobalData.m_oRenderTargetBuilder.AddResolveColorTexture(_pTexture);
   }
 
-  void EndRenderTargetSetup()
+  static void EndRenderTargetSetupImpl()
   {
     s_oGlobalData.m_oRenderTargetBuilder.Build();
     s_oGlobalData.m_oRenderTargetBuilder.Clear();
+  }
+
+  bool EndRenderTargetSetup()
+  {
+    return CallOrFail("EndRenderTargetSetup", [&] { EndRenderTargetSetupImpl(); return true; });
   }
 
   void ClearRenderTarget(RenderTarget* /*_pRenderTarget*/)
@@ -1008,7 +1041,7 @@ namespace api
     }
   }
 
-  void DestroyRenderTarget(RenderTarget* _pRenderTarget)
+  static void DestroyRenderTargetImpl(RenderTarget* _pRenderTarget)
   {
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
@@ -1018,21 +1051,22 @@ namespace api
 
     vkDestroyRenderPass(s_oGlobalData.m_oWindow.m_hDevice, _pRenderTarget->m_hRenderPass, nullptr);
 
-    if (_pRenderTarget->m_pImageViews)
+    for (uint32_t i = 0; i < _pRenderTarget->m_uAttachmentCount; i++)
     {
-      for (uint32_t i = 0; i < _pRenderTarget->m_uAttachmentCount; i++)
-      {
-        vkDestroyImageView(s_oGlobalData.m_oWindow.m_hDevice, _pRenderTarget->m_pImageViews[i], nullptr);
-      }
-      s_oVkImageViewPool.ReturnElements(_pRenderTarget->m_pImageViews);
+      vkDestroyImageView(s_oGlobalData.m_oWindow.m_hDevice, _pRenderTarget->m_aImageViews[i], nullptr);
     }
 
-    s_oRenderTargetPool.ReturnElement(_pRenderTarget);
+    _pRenderTarget->~RenderTarget();
+  }
+
+  void DestroyRenderTarget(RenderTarget* _pRenderTarget)
+  {
+    CallOrFatal("DestroyRenderTarget", [&] { DestroyRenderTargetImpl(_pRenderTarget); });
   }
 
   // Render state
 
-  RenderState* CreateRenderState(const RenderStateInfo& _oInfo, const RenderTarget* _pRenderTarget, uint32_t _uMsaaSamples)
+  static RenderState* CreateRenderStateImpl(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* _pRenderTarget, uint32_t _uMsaaSamples)
   {
 
     VkRenderPass hRenderPass = VK_NULL_HANDLE;
@@ -1046,12 +1080,16 @@ namespace api
       hRenderPass = s_oGlobalData.m_oWindow.m_hRenderPass;
     }
 
-    RenderState* pRenderState = s_oRenderStatePool.PullElement();
+    RenderState* pRenderState = NewObject<RenderState>(_pAllocator);
 
     uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;    
 
-    file::InFile oVSFile(_oInfo.m_sVSFilename.c_str());
-    file::InFile oPSFile(_oInfo.m_sPSFilename.c_str());
+    file::InFile oVSFile(_oInfo.m_sVSFilename.data());
+    file::InFile oPSFile(_oInfo.m_sPSFilename.data());
+    if (!oVSFile.GetData() || !oPSFile.GetData())
+    {
+      THROW_GENERIC_EXCEPTION("[API] Missing shader file")
+    }
     
     SpvReflectResult eResult = spvReflectCreateShaderModule(oVSFile.GetSize(), static_cast<void*>(oVSFile.GetData()), &(pRenderState->m_oVertexReflection));
     if (eResult != SPV_REFLECT_RESULT_SUCCESS)
@@ -1068,11 +1106,17 @@ namespace api
     ReflectSetLayouts(pRenderState->m_oVertexReflection, pRenderState->m_aLayoutBuilders);
     ReflectSetLayouts(pRenderState->m_oPixelReflection, pRenderState->m_aLayoutBuilders);
 
+    // Destroyed on scope exit even if something below throws
+    std::optional<file::InFile> oGSFile;
     file::InFile* pGSFile = nullptr;
 
     if (!_oInfo.m_sGSFilename.empty())
     {      
-      pGSFile = new file::InFile(_oInfo.m_sGSFilename.c_str());
+      pGSFile = &oGSFile.emplace(_oInfo.m_sGSFilename.data());
+      if (!pGSFile->GetData())
+      {
+        THROW_GENERIC_EXCEPTION("[API] Missing geometry shader file")
+      }
 
       eResult = spvReflectCreateShaderModule(pGSFile->GetSize(), static_cast<void*>(pGSFile->GetData()), &(pRenderState->m_oGeomReflection));
       if (eResult != SPV_REFLECT_RESULT_SUCCESS)
@@ -1099,12 +1143,13 @@ namespace api
     
     CreatePipeline(oVSFile, oPSFile, pGSFile, _oInfo, hRenderPass, static_cast<VkSampleCountFlagBits>(_uMsaaSamples), uNumAttachments, pRenderState);
 
-    if (pGSFile)
-    {
-      delete pGSFile;
-    }
     
     return pRenderState;
+  }
+
+  RenderState* CreateRenderState(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* _pRenderTarget, uint32_t _uMsaaSamples)
+  {
+    return CallOrFail("CreateRenderState", [&] { return CreateRenderStateImpl(_pAllocator, _oInfo, _pRenderTarget, _uMsaaSamples); });
   }
 
   void BindRenderState(RenderState* _pAPIRenderState)
@@ -1114,7 +1159,7 @@ namespace api
     vkCmdBindPipeline(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], VK_PIPELINE_BIND_POINT_GRAPHICS, _pAPIRenderState->m_hGraphicsPipeline);    
   }
 
-  void DestroyRenderState(RenderState* _pAPIRenderState)
+  static void DestroyRenderStateImpl(RenderState* _pAPIRenderState)
   {
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
@@ -1139,12 +1184,18 @@ namespace api
 
     vkDestroyPipeline(s_oGlobalData.m_oWindow.m_hDevice, _pAPIRenderState->m_hGraphicsPipeline, NULL);
 
-    s_oRenderStatePool.ReturnElement(_pAPIRenderState);
+    // Releases the containers inside the layout builders
+    _pAPIRenderState->~RenderState();
   }    
+
+  void DestroyRenderState(RenderState* _pAPIRenderState)
+  {
+    CallOrFatal("DestroyRenderState", [&] { DestroyRenderStateImpl(_pAPIRenderState); });
+  }
 
   // SHader reflection
 
-  uint32_t GetConstantBufferCount(const RenderState* _pAPIRenderState, PipelineStage _eStage)
+  static uint32_t GetConstantBufferCountImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage)
   {
     uint32_t uCBufferCount = 0u;
 
@@ -1174,12 +1225,17 @@ namespace api
     return uCBufferCount;
   }
 
+  uint32_t GetConstantBufferCount(const RenderState* _pAPIRenderState, PipelineStage _eStage)
+  {
+    return CallOrFail("GetConstantBufferCount", [&] { return GetConstantBufferCountImpl(_pAPIRenderState, _eStage); });
+  }
+
   uint32_t GetTextureCount(const RenderState* _pAPIRenderState, PipelineStage _eStage)
   {
     return 0u;
   }
 
-  std::string GetConstantBufferName(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  static const char* GetConstantBufferNameImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
   {
     uint32_t uDescSetCount = 0u;
     SpvReflectDescriptorSet* aDescSets[4];
@@ -1216,12 +1272,17 @@ namespace api
     return "";
   }
 
+  const char* GetConstantBufferName(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  {
+    return CallOrFail("GetConstantBufferName", [&] { return GetConstantBufferNameImpl(_pAPIRenderState, _eStage, _uIdx); });
+  }
+
   const char* GetTextureName(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
   {
     return nullptr;
   }
 
-  uint32_t GetConstantBufferMemberCount(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  static uint32_t GetConstantBufferMemberCountImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
   {
     uint32_t uDescSetCount = 0u;
     SpvReflectDescriptorSet* aDescSets[4];
@@ -1258,7 +1319,12 @@ namespace api
     return 0u;
   }
 
-  std::string GetConstantBufferMemberName(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  uint32_t GetConstantBufferMemberCount(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  {
+    return CallOrFail("GetConstantBufferMemberCount", [&] { return GetConstantBufferMemberCountImpl(_pAPIRenderState, _eStage, _uIdx); });
+  }
+
+  static const char* GetConstantBufferMemberNameImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
     uint32_t uDescSetCount = 0u;
     SpvReflectDescriptorSet* aDescSets[4];
@@ -1299,7 +1365,12 @@ namespace api
     return "";
   }
 
-  size_t GetConstantBufferMemberSize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  const char* GetConstantBufferMemberName(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  {
+    return CallOrFail("GetConstantBufferMemberName", [&] { return GetConstantBufferMemberNameImpl(_pAPIRenderState, _eStage, _uIdx, _uMemberIdx); });
+  }
+
+  static size_t GetConstantBufferMemberSizeImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
 
     uint32_t uDescSetCount = 0u;
@@ -1341,7 +1412,12 @@ namespace api
     return 0u;
   }
 
-  ConstantBufferType GetConstantBufferMemberType(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  size_t GetConstantBufferMemberSize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  {
+    return CallOrFail("GetConstantBufferMemberSize", [&] { return GetConstantBufferMemberSizeImpl(_pAPIRenderState, _eStage, _uIdx, _uMemberIdx); });
+  }
+
+  static ConstantBufferType GetConstantBufferMemberTypeImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
 
     uint32_t uDescSetCount = 0u;
@@ -1418,7 +1494,12 @@ namespace api
     return ConstantBufferType::NONE;
   }
 
-  uint32_t GetConstantBufferMemberArraySize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  ConstantBufferType GetConstantBufferMemberType(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  {
+    return CallOrFail("GetConstantBufferMemberType", [&] { return GetConstantBufferMemberTypeImpl(_pAPIRenderState, _eStage, _uIdx, _uMemberIdx); });
+  }
+
+  static uint32_t GetConstantBufferMemberArraySizeImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
     uint32_t uDescSetCount = 0u;
     SpvReflectDescriptorSet* aDescSets[4];
@@ -1468,6 +1549,11 @@ namespace api
     return 0u;
   }
 
+  uint32_t GetConstantBufferMemberArraySize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  {
+    return CallOrFail("GetConstantBufferMemberArraySize", [&] { return GetConstantBufferMemberArraySizeImpl(_pAPIRenderState, _eStage, _uIdx, _uMemberIdx); });
+  }
+
   // Uniform block of the _uIdx-th uniform buffer, using the same ordering as the functions above
   static const SpvReflectBlockVariable* FindUniformBlock(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
   {
@@ -1501,7 +1587,7 @@ namespace api
     return nullptr;
   }
 
-  size_t GetConstantBufferSize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  static size_t GetConstantBufferSizeImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
   {
     if (const SpvReflectBlockVariable* pBlock = FindUniformBlock(_pAPIRenderState, _eStage, _uIdx))
     {
@@ -1513,7 +1599,12 @@ namespace api
     return 0u;
   }
 
-  size_t GetConstantBufferMemberOffset(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  size_t GetConstantBufferSize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  {
+    return CallOrFail("GetConstantBufferSize", [&] { return GetConstantBufferSizeImpl(_pAPIRenderState, _eStage, _uIdx); });
+  }
+
+  static size_t GetConstantBufferMemberOffsetImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
     const SpvReflectBlockVariable* pBlock = FindUniformBlock(_pAPIRenderState, _eStage, _uIdx);
 
@@ -1527,20 +1618,30 @@ namespace api
     return 0u;
   }
 
+  size_t GetConstantBufferMemberOffset(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  {
+    return CallOrFail("GetConstantBufferMemberOffset", [&] { return GetConstantBufferMemberOffsetImpl(_pAPIRenderState, _eStage, _uIdx, _uMemberIdx); });
+  }
+
   // Render substate
 
-  ResourceSet* CreateResourceSet(RenderState* _pRenderState, uint32_t _uSetId)
+  static ResourceSet* CreateResourceSetImpl(LinearAllocator* _pAllocator, RenderState* _pRenderState, uint32_t _uSetId)
   {    
-    assert(_uSetId < MAX_DESCRIPTOR_SET_LAYOUTS);
+    ASSERT(_uSetId < MAX_DESCRIPTOR_SET_LAYOUTS);
 
-    ResourceSet* pSubState = s_oResourceSetPool.PullElement();
+    ResourceSet* pSubState = NewObject<ResourceSet>(_pAllocator);
 
     pSubState->m_pRenderState = _pRenderState;
     pSubState->m_uSetId = _uSetId;
 
     uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
-    std::vector<VkDescriptorSetLayout> lstLayouts(uNumImages);
+    pSubState->m_pDescSets = NewArray<VkDescriptorSet>(_pAllocator, uNumImages);
+
+    // The layouts are only needed for the allocation below: take them from the
+    // same allocator and give the memory back right after.
+    const size_t zTempMark = _pAllocator->PeekCurrent();
+    VkDescriptorSetLayout* aLayouts = NewArray<VkDescriptorSetLayout>(_pAllocator, uNumImages);
 
     if(_pRenderState->m_aDescriptorSetLayouts[_uSetId] == VK_NULL_HANDLE)
     {
@@ -1549,20 +1650,25 @@ namespace api
 
     for (int i = 0; i < uNumImages; i++)
     {
-      lstLayouts[i] = _pRenderState->m_aDescriptorSetLayouts[_uSetId];
+      aLayouts[i] = _pRenderState->m_aDescriptorSetLayouts[_uSetId];
     }
 
     VkDescriptorSetAllocateInfo oDescSetAllocInfo{};
     oDescSetAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     oDescSetAllocInfo.descriptorPool = s_oGlobalData.m_oWindow.m_hDescPool;
     oDescSetAllocInfo.descriptorSetCount = uNumImages;
-    oDescSetAllocInfo.pSetLayouts = lstLayouts.data();
+    oDescSetAllocInfo.pSetLayouts = aLayouts;
 
-    pSubState->m_pDescSets = s_oVkDescriptorSetPool.PullElements(uNumImages);
+    VK_CHECK(vkAllocateDescriptorSets(s_oGlobalData.m_oWindow.m_hDevice, &oDescSetAllocInfo, pSubState->m_pDescSets))
 
-    VK_CHECK(vkAllocateDescriptorSets(s_oGlobalData.m_oWindow.m_hDevice, &oDescSetAllocInfo, pSubState->m_pDescSets))    
+    _pAllocator->Rollback(zTempMark);    
 
     return pSubState;
+  }
+
+  ResourceSet* CreateResourceSet(LinearAllocator* _pAllocator, RenderState* _pRenderState, uint32_t _uSetId)
+  {
+    return CallOrFail("CreateResourceSet", [&] { return CreateResourceSetImpl(_pAllocator, _pRenderState, _uSetId); });
   }
 
   void BeginResourceSetSetup(ResourceSet* _pSubState)
@@ -1574,22 +1680,39 @@ namespace api
     s_oGlobalData.m_oDescSetUpdater.SetDescriptorSets(_pSubState->m_pDescSets);    
   }
 
-  void ResourceSetAddConstantBuffer(ResourceSet* _pSubState, ConstantBuffer* _pCBuffer, size_t _uSize, const ResourceBindInfo& _oBindInfo)
+  bool ResourceSetAddConstantBuffer(ResourceSet* _pSubState, ConstantBuffer* _pCBuffer, size_t _uSize, const ResourceBindInfo& _oBindInfo)
   {           
     uint32_t uBinding = _pSubState->m_pRenderState->m_aLayoutBuilders[_pSubState->m_uSetId].FindBinding(_oBindInfo.m_sName, GetVkShaderFlags(_oBindInfo.m_uStageFlags), VkDescriptorType::VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    if (uBinding == 0xFFFFFFFFu)
+    {
+      LogError("[API] Cbuffer '%s' not found in the shaders", _oBindInfo.m_sName);
+      return false;
+    }
     AddBufferToDescSetUpdater(_pCBuffer, _uSize, uBinding, _oBindInfo.m_uStageFlags);
+    return true;
   }
 
-  void ResourceSetAddTexture(ResourceSet* _pSubState, Texture* _pTexture, const ResourceBindInfo& _oBindInfo)
+  bool ResourceSetAddTexture(ResourceSet* _pSubState, Texture* _pTexture, const ResourceBindInfo& _oBindInfo)
   {     
     uint32_t uBinding = _pSubState->m_pRenderState->m_aLayoutBuilders[_pSubState->m_uSetId].FindBinding(_oBindInfo.m_sName, GetVkShaderFlags(_oBindInfo.m_uStageFlags), VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    if (uBinding == 0xFFFFFFFFu)
+    {
+      LogError("[API] Texture '%s' not found in the shaders", _oBindInfo.m_sName);
+      return false;
+    }
     AddImageToDescSetUpdater(_pTexture, uBinding, _oBindInfo.m_uStageFlags);
+    return true;
   }
 
-  void EndResourceSetSetup()
+  static void EndResourceSetSetupImpl()
   {        
     s_oGlobalData.m_oDescSetUpdater.Update();
     s_oGlobalData.m_oDescSetUpdater.Clear();
+  }
+
+  bool EndResourceSetSetup()
+  {
+    return CallOrFail("EndResourceSetSetup", [&] { EndResourceSetSetupImpl(); return true; });
   }
 
   void BindResourceSet(RenderState* _pRenderState, ResourceSet* _pResourceSet)
@@ -1598,7 +1721,7 @@ namespace api
     vkCmdBindDescriptorSets(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], VK_PIPELINE_BIND_POINT_GRAPHICS, _pRenderState->m_hPipelineLayout, _pResourceSet->m_uSetId, 1, &_pResourceSet->m_pDescSets[uFrameIdx], 0, NULL);
   }
 
-  void DestroyResourceSet(ResourceSet* _pAPIResourceSet)
+  static void DestroyResourceSetImpl(ResourceSet* _pAPIResourceSet)
   {
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
 
@@ -1607,20 +1730,28 @@ namespace api
     uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
     vkFreeDescriptorSets(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_hDescPool, uNumImages, _pAPIResourceSet->m_pDescSets);
 
-    s_oVkDescriptorSetPool.ReturnElements(_pAPIResourceSet->m_pDescSets);
+    _pAPIResourceSet->~ResourceSet();
+  }
 
-    s_oResourceSetPool.ReturnElement(_pAPIResourceSet);
+  void DestroyResourceSet(ResourceSet* _pAPIResourceSet)
+  {
+    CallOrFatal("DestroyResourceSet", [&] { DestroyResourceSetImpl(_pAPIResourceSet); });
   }
 
   // Drawing
 
-  void WaitForLastImage(const Window* _pWindow)
+  static void WaitForLastImageImpl(const Window* _pWindow)
   {
     VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, 1u, &s_oGlobalData.m_oWindow.m_pInFlightFences[s_oGlobalData.m_oWindow.m_uCurrFrameIdx], VK_TRUE, UINT64_MAX))
     s_oGlobalData.m_bRenderBegan = false;
   }
 
-  int BeginDraw()
+  void WaitForLastImage(const Window* _pWindow)
+  {
+    CallOrFatal("WaitForLastImage", [&] { WaitForLastImageImpl(_pWindow); });
+  }
+
+  static int BeginDrawImpl()
   {
 
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
@@ -1673,7 +1804,12 @@ namespace api
     return 0;
   }
 
-  void BeginDrawOffline()
+  int BeginDraw()
+  {
+    return CallOrFatal("BeginDraw", [&] { return BeginDrawImpl(); });
+  }
+
+  static void BeginDrawOfflineImpl()
   {
 
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
@@ -1690,6 +1826,11 @@ namespace api
     oCommandBufferBeginInfo.pInheritanceInfo = NULL;
 
     VK_CHECK(vkBeginCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], &oCommandBufferBeginInfo))
+  }
+
+  void BeginDrawOffline()
+  {
+    CallOrFatal("BeginDrawOffline", [&] { BeginDrawOfflineImpl(); });
   }
   
   void DrawMesh(RenderState* _pRenderState, Mesh* _pMesh, uint32_t _uIndexCount, const void* _pConstantData, uint32_t _uConstantSize)
@@ -1709,7 +1850,7 @@ namespace api
 
   }
 
-  void EndDraw()
+  static void EndDrawImpl()
   {    
 
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;    
@@ -1733,7 +1874,12 @@ namespace api
     VK_CHECK(vkQueueSubmit(s_oGlobalData.m_oWindow.m_hRenderQueue, 1, &oSubmitInfo, s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx]))   
   }
 
-  void Present()
+  void EndDraw()
+  {
+    CallOrFatal("EndDraw", [&] { EndDrawImpl(); });
+  }
+
+  static void PresentImpl()
   {
 
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
@@ -1756,6 +1902,11 @@ namespace api
     //s_oGlobalData.m_oWindow.m_uCurrSwapchainImageIdx = (s_oGlobalData.m_oWindow.m_uCurrSwapchainImageIdx + 1u) % s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
     s_oGlobalData.m_oWindow.m_uCurrFrameIdx = (s_oGlobalData.m_oWindow.m_uCurrFrameIdx + 1u) % s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
+  }
+
+  void Present()
+  {
+    CallOrFatal("Present", [&] { PresentImpl(); });
   }
 
   // Misc
