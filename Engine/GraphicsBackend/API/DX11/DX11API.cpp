@@ -6,16 +6,12 @@
 #include <dxgi.h>
 #include <cmath>
 
-#include "imgui.h"
-#include "backends/imgui_impl_win32.h"
-#include "backends/imgui_impl_dx11.h"
-
 #include "API/GraphicsAPI.h"
 
-#include "FileUtils.h"
-#include "InFile.h"
+#include "ShaderCode.h"
 #include "BlendEnums.h"
-#include "Exception.h"
+#include "Asserts.h"
+#include "Log.h"
 #include "PipelineStage.h"
 #include "SamplerConfig.h"
 #include "ImageFormat.h"
@@ -37,99 +33,22 @@
 #include "API/DX11/DX11BindSlotOffset.h"
 #include "API/DX11/APIInternal.h"
 #include "APIAllocation.h"
-#include "APIBoundary.h"
 
 namespace wrl = Microsoft::WRL;
-
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-#define CUSTOM_PROP_NAME "CustomWndProcData"
 
 #define INVALID_BINDING_SLOT 0xFFFFFFFFu
 
 namespace api
-{    
-
-  // Define the user data structure
-  struct WndProcData
-  {
-    WNDPROC originalWndProc;  // The original WndProc
-  };
-
-  // Forward declaration of the custom WndProc
-  LRESULT CALLBACK CustomWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-  void HookWndProc(HWND _hwnd)
-  {
-
-    // Allocate and set the WndProc data
-    WndProcData* data = new WndProcData();
-    data->originalWndProc = (WNDPROC)GetWindowLongPtr(_hwnd, GWLP_WNDPROC);
-
-    // Set the custom data as a property of the window
-    SetProp(_hwnd, CUSTOM_PROP_NAME, (HANDLE)data);
-
-    // Hook the new WndProc
-    SetWindowLongPtr(_hwnd, GWLP_WNDPROC, (LONG_PTR)CustomWndProc);
-  }
-
-  void RestoreOriginalWndProc(HWND _hwnd)
-  {
-
-    // Retrieve the custom WndProc data
-    WndProcData* data = (WndProcData*)GetProp(_hwnd, CUSTOM_PROP_NAME);
-
-    if (data)
-    {
-      // Restore the original WndProc
-      SetWindowLongPtr(_hwnd, GWLP_WNDPROC, (LONG_PTR)data->originalWndProc);
-
-      // Clean up the custom data
-      RemoveProp(_hwnd, CUSTOM_PROP_NAME);
-      delete data;
-    }
-  }
-
-  LRESULT CALLBACK CustomWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
-  {
-    // Retrieve the custom WndProc data
-    WndProcData* data = (WndProcData*)GetProp(hWnd, CUSTOM_PROP_NAME);
-
-    // Forward the event to ImGui's WndProc handler
-    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
-    {
-      return true;
-    }
-
-    // Call the original WndProc
-    if (data && data->originalWndProc)
-    {
-      return CallWindowProc(data->originalWndProc, hWnd, msg, wParam, lParam);
-    }
-
-    // Default processing if no original WndProc exists
-    return DefWindowProc(hWnd, msg, wParam, lParam);
-  }
-    
+{
   // General
 
-  bool Initialize()
+  void Initialize()
   {
     s_oGlobalData.m_uMaxMsaaSamples = 0u;
-
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-
-    ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls  
-
-    return true;
   }
 
   void ShutDown()
   {
-
-    ImGui::DestroyContext();
   }
 
   uint32_t GetMaxMsaaSamples()
@@ -139,9 +58,8 @@ namespace api
 
   // Window
 
-  static Texture* CreateTextureImpl(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap);
 
-  static void CreateAPIWindowImpl(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples)
+  void CreateAPIWindow(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples)
   {      
 
     s_oGlobalData.m_oWindow.m_hWnd = _hwnd;
@@ -172,20 +90,6 @@ namespace api
     // Default to triangle list just in case
     s_oGlobalData.m_oWindow.m_pContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    // ImGui stuff
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-
-    ImGui::StyleColorsDark();
-
-    ImGui_ImplWin32_Init(s_oGlobalData.m_oWindow.m_hWnd);
-    ImGui_ImplDX11_Init(s_oGlobalData.m_oWindow.m_pDevice.Get(), s_oGlobalData.m_oWindow.m_pContext.Get());
-
-    ImGui::GetIO().DisplaySize.x = static_cast<float>(s_oGlobalData.m_oWindow.m_uWidth);
-    ImGui::GetIO().DisplaySize.y = static_cast<float>(s_oGlobalData.m_oWindow.m_uHeight);
-
-    HookWndProc(s_oGlobalData.m_oWindow.m_hWnd);
-
     SamplerConfig oSamplerCfg = {};
     oSamplerCfg.m_eAddressMode = TextureAddressMode::CLAMP;
     oSamplerCfg.m_eMagFilterMode = TextureFilterMode::POINT;
@@ -194,15 +98,15 @@ namespace api
 
     uint8_t aDummyBuffer[4] = { 255u, 20u, 0u, 255u };
     void* pDummyBuffer = &(aDummyBuffer[0]);
-    // The throwing version: a window without its dummy texture is a failed window
-    s_oGlobalData.m_oWindow.m_pDummyTexture = CreateTextureImpl(_pAllocator, &pDummyBuffer, 1u, 1u, ImageFormat::R8G8B8A8, 1u, 1u, TextureUsage::SHADER_RESOURCE, oSamplerCfg, false);
+    s_oGlobalData.m_oWindow.m_pDummyTexture = CreateTexture(_pAllocator, &pDummyBuffer, 1u, 1u, ImageFormat::R8G8B8A8, 1u, 1u, TextureUsage::SHADER_RESOURCE, oSamplerCfg, false);
+    FATAL_ASSERT_MSG(s_oGlobalData.m_oWindow.m_pDummyTexture, "[DX11] Could not create the dummy texture (see log)");
 
 #ifndef NDEBUG
+    // Optional: only there when the device has the debug layer
     Microsoft::WRL::ComPtr<ID3D11Debug> d3dDebug;
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice.As(&d3dDebug))
-
     Microsoft::WRL::ComPtr<ID3D11InfoQueue> d3dInfoQueue;
-    DX11_CHECK(d3dDebug.As(&d3dInfoQueue))
+    if (DX11_OK(s_oGlobalData.m_oWindow.m_pDevice.As(&d3dDebug)) && DX11_OK(d3dDebug.As(&d3dInfoQueue)))
+    {
     D3D11_MESSAGE_ID hide[] =
     {
       D3D11_MESSAGE_ID_DEVICE_DRAW_RENDERTARGETVIEW_NOT_SET,
@@ -212,12 +116,8 @@ namespace api
     filter.DenyList.NumIDs = _countof(hide);
     filter.DenyList.pIDList = hide;
     d3dInfoQueue->AddStorageFilterEntries(&filter);
+    }
 #endif
-  }
-
-  bool CreateAPIWindow(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples)
-  {
-    return CallOrFail("CreateAPIWindow", [&] { CreateAPIWindowImpl(_pAllocator, _hwnd, _uMsaaSamples); return true; });
   }
 
   bool IsWindowCreated()
@@ -274,22 +174,12 @@ namespace api
 
   void UnbindDefaultRenderTarget()
   {
-
-    ImGui::Render();
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
     ID3D11RenderTargetView* pNullView =  nullptr;
     s_oGlobalData.m_oWindow.m_pContext->OMSetRenderTargets(1, &pNullView, nullptr);
   }
 
   void DestroyWindow()
   {
-
-    RestoreOriginalWndProc(s_oGlobalData.m_oWindow.m_hWnd);
-
-    ImGui_ImplDX11_Shutdown();
-    ImGui_ImplWin32_Shutdown();
-
     DestroyTexture(s_oGlobalData.m_oWindow.m_pDummyTexture);
 
     s_oGlobalData.m_oWindow.m_pRtv = nullptr;
@@ -310,7 +200,7 @@ namespace api
 
   // Mesh
 
-  static Mesh* CreateMeshImpl(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t /*_uMeshConstantSize*/)
+  Mesh* CreateMesh(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t /*_uMeshConstantSize*/)
   {
 
     Mesh* pMesh = NewObject<Mesh>(_pAllocator);
@@ -329,7 +219,10 @@ namespace api
     D3D11_SUBRESOURCE_DATA oVBData = {};
     oVBData.pSysMem = _pVertexData;
 
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateBuffer(&oVBDesc, &oVBData, pMesh->m_pVertexBuffer.GetAddressOf()))
+    if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateBuffer(&oVBDesc, &oVBData, pMesh->m_pVertexBuffer.GetAddressOf())))
+    {
+      return nullptr;
+    }
 
     // Index buffer
 
@@ -346,7 +239,10 @@ namespace api
     oIBData.SysMemPitch = 0;
     oIBData.SysMemSlicePitch = 0;
 
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateBuffer(&oIBDesc, &oIBData, pMesh->m_pIndexBuffer.GetAddressOf()))
+    if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateBuffer(&oIBDesc, &oIBData, pMesh->m_pIndexBuffer.GetAddressOf())))
+    {
+      return nullptr;
+    }
 
     pMesh->m_uIndexCount = static_cast<uint32_t>(_uIndexDataSize / sizeof(uint16_t));
 
@@ -362,11 +258,6 @@ namespace api
     return oGuard.Release();
   }
 
-  Mesh* CreateMesh(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t _uMeshConstantSize)
-  {
-    return CallOrFail("CreateMesh", [&] { return CreateMeshImpl(_pAllocator, _pVertexData, _uVertexDataSize, _pIndexData, _uIndexDataSize, _uMeshConstantSize); });
-  }
-
   void DestroyMesh(Mesh* _pMesh)
   {
     //DestroyConstantBuffer(g_pWindow, _pMesh->m_pModelCBuffer);
@@ -375,7 +266,7 @@ namespace api
 
   // Constant buffer
 
-  static ConstantBuffer* CreateConstantBufferImpl(LinearAllocator* _pAllocator, size_t _uSize)
+  ConstantBuffer* CreateConstantBuffer(LinearAllocator* _pAllocator, size_t _uSize)
   {
     ConstantBuffer* pCBuffer = NewObject<ConstantBuffer>(_pAllocator);
     CreationGuard<ConstantBuffer> oGuard(pCBuffer);
@@ -388,20 +279,18 @@ namespace api
     oDesc.ByteWidth = static_cast<UINT>(_uSize);
     oDesc.StructureByteStride = 0;
 
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateBuffer(&oDesc, NULL, pCBuffer->m_pCBuffer.GetAddressOf()));
+    if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateBuffer(&oDesc, NULL, pCBuffer->m_pCBuffer.GetAddressOf())))
+    {
+      return nullptr;
+    }
       
     return oGuard.Release();
   }
 
-  ConstantBuffer* CreateConstantBuffer(LinearAllocator* _pAllocator, size_t _uSize)
-  {
-    return CallOrFail("CreateConstantBuffer", [&] { return CreateConstantBufferImpl(_pAllocator, _uSize); });
-  }
-
-  static void UpdateConstantBufferImpl(ConstantBuffer* _pCbuffer, const void* _pData, size_t /*_uSize*/)
+  void UpdateConstantBuffer(ConstantBuffer* _pCbuffer, const void* _pData, size_t /*_uSize*/)
   {            
     /*D3D11_MAPPED_SUBRESOURCE oMsr;
-    DX11_CHECK(pWindow->m_pContext->Map(_pCBuffer->m_pCBuffer.Get(), 0u, D3D11_MAP_WRITE_DISCARD, 0u, &oMsr));
+    DX11_CHECK_FATAL(pWindow->m_pContext->Map(_pCBuffer->m_pCBuffer.Get(), 0u, D3D11_MAP_WRITE_DISCARD, 0u, &oMsr));
 
     memcpy(oMsr.pData, &_pData, _uSize);
 
@@ -411,11 +300,6 @@ namespace api
 
   }
 
-  void UpdateConstantBuffer(ConstantBuffer* _pCbuffer, const void* _pData, size_t _uSize)
-  {
-    CallOrFatal("UpdateConstantBuffer", [&] { UpdateConstantBufferImpl(_pCbuffer, _pData, _uSize); });
-  }
-
   void DestroyConstantBuffer(ConstantBuffer* _pCBuffer)
   {
     _pCBuffer->~ConstantBuffer();
@@ -423,7 +307,7 @@ namespace api
 
   // Texture
 
-  static Texture* CreateTextureImpl(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
+  Texture* CreateTexture(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
   {
     Texture* pTexture = NewObject<Texture>(_pAllocator);
     CreationGuard<Texture> oGuard(pTexture);
@@ -435,7 +319,7 @@ namespace api
     DXGI_FORMAT eDXGIFormat = GetDXGIFormat(_eFormat);
     DXGI_FORMAT eDXGISrvFormat = GetDXGISrvFormat(_eFormat);
 
-    uint32_t uMaxMipLevels = static_cast<uint32_t>(std::floor(std::log2(max(_uWidth, _uWidth)))) + 1;
+    uint32_t uMaxMipLevels = static_cast<uint32_t>(std::floor(std::log2(max(_uWidth, _uHeight)))) + 1;
     pTexture->m_uMipLevels = _uMipLevels == 0u ? uMaxMipLevels : min(_uMipLevels, uMaxMipLevels);
 
     uint32_t uBindFlags = GetTextureUsage(_uUsage);
@@ -482,7 +366,10 @@ namespace api
           }
         }
 
-        DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateTexture2D(&oTexDesc, _ppData ? &aData[0] : nullptr, pTexture->m_pTexture.GetAddressOf()));
+        if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateTexture2D(&oTexDesc, _ppData ? &aData[0] : nullptr, pTexture->m_pTexture.GetAddressOf())))
+        {
+          return nullptr;
+        }
       }
       else
       {
@@ -490,13 +377,19 @@ namespace api
         oData.pSysMem = _ppData ? *_ppData : nullptr;
         oData.SysMemPitch = uMemPitch;
 
-        DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateTexture2D(&oTexDesc, _ppData ? &oData : nullptr, pTexture->m_pTexture.GetAddressOf()));
+        if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateTexture2D(&oTexDesc, _ppData ? &oData : nullptr, pTexture->m_pTexture.GetAddressOf())))
+        {
+          return nullptr;
+        }
       }
     }
     else
     {
       //GFX_THROW_INFO(GetDevice()->CreateTexture2D(&desc, NULL, m_texture.GetAddressOf()));
-      DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateTexture2D(&oTexDesc, nullptr, pTexture->m_pTexture.GetAddressOf()));
+      if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateTexture2D(&oTexDesc, nullptr, pTexture->m_pTexture.GetAddressOf())))
+      {
+        return nullptr;
+      }
     }
 
     D3D11_SHADER_RESOURCE_VIEW_DESC oSrvDesc = {};
@@ -515,7 +408,10 @@ namespace api
       oSrvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;        
     }
 
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateShaderResourceView(pTexture->m_pTexture.Get(), &oSrvDesc, pTexture->m_pSRV.GetAddressOf()));
+    if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateShaderResourceView(pTexture->m_pTexture.Get(), &oSrvDesc, pTexture->m_pSRV.GetAddressOf())))
+    {
+      return nullptr;
+    }
 
     if (_ppData != nullptr && pTexture->m_uMipLevels != 1)
     {
@@ -555,11 +451,6 @@ namespace api
     return oGuard.Release();
   }
 
-  Texture* CreateTexture(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
-  {
-    return CallOrFail("CreateTexture", [&] { return CreateTextureImpl(_pAllocator, _ppData, _uWidth, _uHeight, _eFormat, _uMipLevels, _uMsaaSamples, _uUsage, _rSamplerConfig, _bIsCubemap); });
-  }
-
   void GenerateMipMaps(Texture* _pTexture)
   {
     s_oGlobalData.m_oWindow.m_pContext->GenerateMips(_pTexture->m_pSRV.Get());
@@ -570,22 +461,21 @@ namespace api
 
   }
 
-  static void BlitTextureImpl(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
+  void BlitTexture(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
   {
 
-    if (_rSrcSubResource.m_uMipLevels != _rDstSubResource.m_uMipLevels || _rSrcSubResource.m_uLayers != _rDstSubResource.m_uLayers)
+    // Invalid blits are programming errors: assert and skip
+    const bool bCountsMatch = _rSrcSubResource.m_uMipLevels == _rDstSubResource.m_uMipLevels && _rSrcSubResource.m_uLayers == _rDstSubResource.m_uLayers;
+    const bool bMipsInRange = (_rSrcSubResource.m_uBaseMip + _rSrcSubResource.m_uMipLevels) <= _pSrcTexture->m_uMipLevels
+      && (_rDstSubResource.m_uBaseMip + _rDstSubResource.m_uMipLevels) <= _pDstTexture->m_uMipLevels;
+    const bool bLayersInRange = (_rSrcSubResource.m_uBaseLayer + _rSrcSubResource.m_uLayers) <= _pSrcTexture->m_uLayers
+      && (_rDstSubResource.m_uBaseLayer + _rDstSubResource.m_uLayers) <= _pDstTexture->m_uLayers;
+    ASSERT_MSG(bCountsMatch, "BlitTexture: subresource mip level count and layer count must match");
+    ASSERT_MSG(bMipsInRange, "BlitTexture: subresource mip levels are outside of the texture mip level range");
+    ASSERT_MSG(bLayersInRange, "BlitTexture: subresource array layers are outside of the texture array layer range");
+    if (!bCountsMatch || !bMipsInRange || !bLayersInRange)
     {
-      THROW_GENERIC_EXCEPTION("BlitTexture: Subresource Mip level count and layer count must match");
-    }
-    else if ((_rSrcSubResource.m_uBaseMip + _rSrcSubResource.m_uMipLevels) > _pSrcTexture->m_uMipLevels &&
-      (_rDstSubResource.m_uBaseMip + _rDstSubResource.m_uMipLevels) > _pDstTexture->m_uMipLevels)
-    {
-      THROW_GENERIC_EXCEPTION("BlitTexture: Subresource Mip levels are outside of the texure mip level range");
-    }
-    else if ((_rSrcSubResource.m_uBaseLayer + _rSrcSubResource.m_uLayers) > _pSrcTexture->m_uLayers &&
-      (_rDstSubResource.m_uBaseLayer + _rDstSubResource.m_uLayers) > _pDstTexture->m_uLayers)
-    {
-      THROW_GENERIC_EXCEPTION("BlitTexture: Subresource array layers are outside of the texure array layers range");
+      return;
     }
 
     for (uint32_t uMipLevel = 0; uMipLevel < _rSrcSubResource.m_uMipLevels; uMipLevel++)
@@ -604,11 +494,6 @@ namespace api
           nullptr);
       }
     }
-  }
-
-  void BlitTexture(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
-  {
-    CallOrFatal("BlitTexture", [&] { BlitTextureImpl(_pSrcTexture, _rSrcSubResource, _pDstTexture, _rDstSubResource); });
   }
 
   void DestroyTexture(Texture* _pTexture)
@@ -649,15 +534,11 @@ namespace api
     s_oGlobalData.m_oRenderTargetBuilder.AddResolveColorTexture(_pTexture);
   }
 
-  static void EndRenderTargetSetupImpl()
-  {
-    s_oGlobalData.m_oRenderTargetBuilder.Build();
-    s_oGlobalData.m_oRenderTargetBuilder.Clear();
-  }
-
   bool EndRenderTargetSetup()
   {
-    return CallOrFail("EndRenderTargetSetup", [&] { EndRenderTargetSetupImpl(); return true; });
+    const bool bBuilt = s_oGlobalData.m_oRenderTargetBuilder.Build();
+    s_oGlobalData.m_oRenderTargetBuilder.Clear();
+    return bBuilt;
   }
 
   void ClearRenderTarget(RenderTarget* _pRenderTarget)
@@ -741,24 +622,39 @@ namespace api
 
   // Render state
 
-  static RenderState* CreateRenderStateImpl(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* /*_pRenderTarget*/, uint32_t _uMsaaSamples)
+  RenderState* CreateRenderState(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* /*_pRenderTarget*/, uint32_t _uMsaaSamples)
   {
 
     RenderState* pRenderState = NewObject<RenderState>(_pAllocator);
     CreationGuard<RenderState> oGuard(pRenderState);
 
-    file::InFile oVsFile(_oInfo.m_sVSFilename.data());
-    file::InFile oPsFile(_oInfo.m_sPSFilename.data());
-    if (!oVsFile.GetData() || !oPsFile.GetData())
+    // The bytecode is only needed while creating the render state
+    ScopedRollback oShaderCode(_pAllocator);
+
+    ShaderCode oVs;
+    ShaderCode oPs;
+    if (!LoadShaderCode(_pAllocator, _oInfo.m_sVSFilename.data(), oVs) || !LoadShaderCode(_pAllocator, _oInfo.m_sPSFilename.data(), oPs))
     {
-      THROW_GENERIC_EXCEPTION("[API] Missing shader file")
+      return nullptr;
     }
       
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateVertexShader(oVsFile.GetData(), oVsFile.GetSize(), nullptr, pRenderState->m_pVertexShader.ReleaseAndGetAddressOf()));            
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreatePixelShader(oPsFile.GetData(), oPsFile.GetSize(), nullptr, pRenderState->m_pPixelShader.ReleaseAndGetAddressOf()));      
+    if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateVertexShader(oVs.pData, oVs.zSize, nullptr, pRenderState->m_pVertexShader.ReleaseAndGetAddressOf())))
+    {
+      return nullptr;
+    }            
+    if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreatePixelShader(oPs.pData, oPs.zSize, nullptr, pRenderState->m_pPixelShader.ReleaseAndGetAddressOf())))
+    {
+      return nullptr;
+    }      
 
-    DX11_CHECK(D3DReflect(oVsFile.GetData(), oVsFile.GetSize(), IID_ID3D11ShaderReflection, (void**)pRenderState->m_pVertexReflection.ReleaseAndGetAddressOf()));
-    DX11_CHECK(D3DReflect(oPsFile.GetData(), oPsFile.GetSize(), IID_ID3D11ShaderReflection, (void**)pRenderState->m_pPixelReflection.ReleaseAndGetAddressOf()));
+    if (!DX11_OK(D3DReflect(oVs.pData, oVs.zSize, IID_ID3D11ShaderReflection, (void**)pRenderState->m_pVertexReflection.ReleaseAndGetAddressOf())))
+    {
+      return nullptr;
+    }
+    if (!DX11_OK(D3DReflect(oPs.pData, oPs.zSize, IID_ID3D11ShaderReflection, (void**)pRenderState->m_pPixelReflection.ReleaseAndGetAddressOf())))
+    {
+      return nullptr;
+    }
 
     pRenderState->m_pGeometryShader = nullptr;
 
@@ -771,15 +667,21 @@ namespace api
       std::string sGSFilename(_oInfo.m_sGSFilename);
       sGSFilename = sGSFilename.empty() ? "" : sGSFilename.substr(uSlashPosGS, uDotPosGS - uSlashPosGS) + ".cso";
 
-      file::InFile oGsFile(_oInfo.m_sGSFilename.empty() ? "" : (sGSPath + sGSFilename).c_str());
-      if (!oGsFile.GetData())
+      ShaderCode oGs;
+      if (!LoadShaderCode(_pAllocator, (sGSPath + sGSFilename).c_str(), oGs))
       {
-        THROW_GENERIC_EXCEPTION("[API] Missing geometry shader file")
+        return nullptr;
       }
 
-      DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateGeometryShader(oGsFile.GetData(), oGsFile.GetSize(), nullptr, pRenderState->m_pGeometryShader.ReleaseAndGetAddressOf()));
+      if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateGeometryShader(oGs.pData, oGs.zSize, nullptr, pRenderState->m_pGeometryShader.ReleaseAndGetAddressOf())))
+      {
+        return nullptr;
+      }
 
-      DX11_CHECK(D3DReflect(oGsFile.GetData(), oGsFile.GetSize(), IID_ID3D11ShaderReflection, (void**)pRenderState->m_pGeometryReflection.ReleaseAndGetAddressOf()));
+      if (!DX11_OK(D3DReflect(oGs.pData, oGs.zSize, IID_ID3D11ShaderReflection, (void**)pRenderState->m_pGeometryReflection.ReleaseAndGetAddressOf())))
+      {
+        return nullptr;
+      }
     }
 
     const D3D11_INPUT_ELEMENT_DESC oInputDesc[] =
@@ -791,7 +693,10 @@ namespace api
       {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,	   0,	D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0}
     };
 
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateInputLayout(oInputDesc, 5u, oVsFile.GetData(), oVsFile.GetSize(), pRenderState->m_pInputLayout.ReleaseAndGetAddressOf()))
+    if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateInputLayout(oInputDesc, 5u, oVs.pData, oVs.zSize, pRenderState->m_pInputLayout.ReleaseAndGetAddressOf())))
+    {
+      return nullptr;
+    }
 
     D3D11_RASTERIZER_DESC oRasterizerDesc = {};
     oRasterizerDesc.FillMode = D3D11_FILL_SOLID;
@@ -804,7 +709,10 @@ namespace api
     oRasterizerDesc.MultisampleEnable = _uMsaaSamples > 1u;
     oRasterizerDesc.AntialiasedLineEnable = true;      
 
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateRasterizerState(&oRasterizerDesc, pRenderState->m_pRasterizer.GetAddressOf()))
+    if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateRasterizerState(&oRasterizerDesc, pRenderState->m_pRasterizer.GetAddressOf())))
+    {
+      return nullptr;
+    }
 
     //BlendState.RenderTarget[0].SrcBlend = (D3D11_BLEND)m_srcBlendFactor;
     //BlendState.RenderTarget[0].DestBlend = (D3D11_BLEND)m_dstBlendFactor;
@@ -826,7 +734,10 @@ namespace api
     oBlendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
     oBlendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;            
 
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateBlendState(&oBlendDesc, pRenderState->m_pBlendState.GetAddressOf()));
+    if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateBlendState(&oBlendDesc, pRenderState->m_pBlendState.GetAddressOf())))
+    {
+      return nullptr;
+    }
 
     D3D11_DEPTH_STENCIL_DESC oDSDesc = {};
     oDSDesc.DepthEnable = _oInfo.m_bDepthWrite || _oInfo.m_bDepthRead;      
@@ -842,14 +753,12 @@ namespace api
     }
       
 
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateDepthStencilState(&oDSDesc, pRenderState->m_pDSState.GetAddressOf()));
+    if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateDepthStencilState(&oDSDesc, pRenderState->m_pDSState.GetAddressOf())))
+    {
+      return nullptr;
+    }
 
     return oGuard.Release();
-  }
-
-  RenderState* CreateRenderState(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* _pRenderTarget, uint32_t _uMsaaSamples)
-  {
-    return CallOrFail("CreateRenderState", [&] { return CreateRenderStateImpl(_pAllocator, _oInfo, _pRenderTarget, _uMsaaSamples); });
   }
 
   void BeginRenderStateSetup(RenderState* /*_pRenderState*/)
@@ -1318,38 +1227,20 @@ namespace api
     // We dont really need this feature, I think. DX11 should manage synchronization automatically
   }
 
-  static int BeginDrawImpl()
+  int BeginDraw()
   {
     if (s_oGlobalData.m_oWindow.m_bResize)
     {
-      ImGui_ImplDX11_InvalidateDeviceObjects();
-
+      // ImGui's device objects (font texture, buffers, shaders) don't depend on the
+      // swapchain, so they survive the resize untouched
       ResizeSwapchain();
-
-      ImGui_ImplDX11_CreateDeviceObjects();
-
-      // The window can report a resize before the first frame, when no ImGui frame was ever begun
-      if (ImGui::GetFrameCount() > 0)
-      {
-        ImGui::EndFrame();
-      }
-
-      ImGui::GetIO().DisplaySize.x = static_cast<float>(s_oGlobalData.m_oWindow.m_uWidth);
-      ImGui::GetIO().DisplaySize.y = static_cast<float>(s_oGlobalData.m_oWindow.m_uHeight);
 
       s_oGlobalData.m_oWindow.m_bResize = false;
 
       return 1;
-    }            
+    }
 
-    api::ImGuiNewFrame();
-      
     return 0;
-  }
-
-  int BeginDraw()
-  {
-    return CallOrFatal("BeginDraw", [&] { return BeginDrawImpl(); });
   }
 
   void BeginDrawOffline()
@@ -1376,33 +1267,19 @@ namespace api
     // Nothing to do...
   }
 
-  static void PresentImpl()
+  void Present()
   {
     if (s_oGlobalData.m_oWindow.m_pColorTexture)
     {
       ID3D11Texture2D* pBackBuffer = nullptr;
-      DX11_CHECK(s_oGlobalData.m_oWindow.m_pSwapchain->GetBuffer(0, __uuidof(ID3D11Resource), reinterpret_cast<void**>(&pBackBuffer)));
+      DX11_CHECK_FATAL(s_oGlobalData.m_oWindow.m_pSwapchain->GetBuffer(0, __uuidof(ID3D11Resource), reinterpret_cast<void**>(&pBackBuffer)));
 
       s_oGlobalData.m_oWindow.m_pContext->ResolveSubresource(pBackBuffer, 0u, s_oGlobalData.m_oWindow.m_pColorTexture.Get(), 0u, s_oGlobalData.m_oWindow.m_eSwapchainFormat);
 
       pBackBuffer->Release();
     }
 
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pSwapchain->Present(1u, 0u))
+    DX11_CHECK_FATAL(s_oGlobalData.m_oWindow.m_pSwapchain->Present(1u, 0u));
   }
 
-  void Present()
-  {
-    CallOrFatal("Present", [&] { PresentImpl(); });
-  }
-
-  // Misc
-
-  void ImGuiNewFrame()
-  {
-    ImGui_ImplDX11_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
-  }
-  
 }

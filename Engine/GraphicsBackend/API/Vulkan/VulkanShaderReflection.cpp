@@ -1,18 +1,19 @@
 #include "API/Vulkan/VulkanShaderReflection.h"
 #include "API/Vulkan/DescriptorUtils.h"
 
-#include "Exception.h"
+#include "Log.h"
 
 #include "3rd/spirv-reflect/spirv_reflect.h"
 
 #include <string>
 
-#define CHECK_REFLECT(x, msg) if (!(x)) { THROW_GENERIC_EXCEPTION(msg) }
+// Logs and fails the reflection (and with it the render state)
+#define CHECK_REFLECT(x, msg) if (!(x)) { LogError("[Vulkan] %s", msg); return false; }
 
 namespace api
 {
 
-void ReflectSetLayouts(const SpvReflectShaderModule& _oReflection, DescriptorSetLayoutBuilder(&aLayoutBuilder_)[MAX_DESCRIPTOR_SET_LAYOUTS])
+bool ReflectSetLayouts(const SpvReflectShaderModule& _oReflection, DescriptorSetLayoutBuilder(&aLayoutBuilder_)[MAX_DESCRIPTOR_SET_LAYOUTS])
 {  
   const SpvReflectEntryPoint* pEntryPoint = spvReflectGetEntryPoint(&_oReflection, "main");
 
@@ -47,6 +48,8 @@ void ReflectSetLayouts(const SpvReflectShaderModule& _oReflection, DescriptorSet
       }
     }
   }
+
+  return true;
 }
 
 }

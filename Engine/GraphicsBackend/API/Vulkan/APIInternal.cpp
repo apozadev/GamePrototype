@@ -1,11 +1,9 @@
 #include "API/Vulkan/APIInternal.h"
 
-#include "imgui.h"
-#include "backends/imgui_impl_win32.h"
-#include "backends/imgui_impl_vulkan.h"
-
 #include "TextureUsage.h"
 #include "API/Vulkan/VulkanMacros.h"
+#include "Asserts.h"
+#include "Log.h"
 #include "API/Vulkan/VulkanShaderReflection.h"
 #include "API/Vulkan/RenderState.h"
 #include "API/Vulkan/ResourceSet.h"
@@ -262,7 +260,7 @@ void CreateInstance()
   oInstanceCreateInfo.flags = 0u;
   oInstanceCreateInfo.enabledLayerCount = uLayerCount;
   oInstanceCreateInfo.ppEnabledLayerNames = pDebugLayers;
-  oInstanceCreateInfo.enabledExtensionCount = lstExtensions.size();
+  oInstanceCreateInfo.enabledExtensionCount = static_cast<uint32_t>(lstExtensions.size());
   oInstanceCreateInfo.ppEnabledExtensionNames = lstExtensions.data();
 
   VkApplicationInfo oApplicationInfo = {};
@@ -276,7 +274,7 @@ void CreateInstance()
   oInstanceCreateInfo.pApplicationInfo = &oApplicationInfo;
 
   s_oGlobalData.m_hInstance = VK_NULL_HANDLE;
-  VK_CHECK(vkCreateInstance(&oInstanceCreateInfo, NULL, &s_oGlobalData.m_hInstance))
+  VK_CHECK_FATAL(vkCreateInstance(&oInstanceCreateInfo, NULL, &s_oGlobalData.m_hInstance));
 }
 
 VkSampleCountFlagBits GetMaxMSAASampleCount()
@@ -299,16 +297,16 @@ VkSampleCountFlagBits GetMaxMSAASampleCount()
 void CreatePhysicalDevice()
 {
   uint32_t uPhysicalDeviceCount = 0;
-  VK_CHECK(vkEnumeratePhysicalDevices(s_oGlobalData.m_hInstance, &uPhysicalDeviceCount, NULL))
+  VK_CHECK_FATAL(vkEnumeratePhysicalDevices(s_oGlobalData.m_hInstance, &uPhysicalDeviceCount, NULL));
     VkPhysicalDevice* pPhysicalDevices = new VkPhysicalDevice[uPhysicalDeviceCount];
-  VK_CHECK(vkEnumeratePhysicalDevices(s_oGlobalData.m_hInstance, &uPhysicalDeviceCount, pPhysicalDevices))
+  VK_CHECK_FATAL(vkEnumeratePhysicalDevices(s_oGlobalData.m_hInstance, &uPhysicalDeviceCount, pPhysicalDevices));
     s_oGlobalData.m_hPhysicalDevice = VK_NULL_HANDLE;
 
   bool bCandidateDeviceDiscrete = false;
 
   constexpr uint32_t uMaxUint = 0xFFFFFFFFu;
 
-  for (int i = 0; i < uPhysicalDeviceCount; i++)
+  for (uint32_t i = 0; i < uPhysicalDeviceCount; i++)
   {
     VkPhysicalDevice hPhysicalDevice = pPhysicalDevices[i];
     VkPhysicalDeviceProperties oDeviceProperties;
@@ -364,16 +362,34 @@ void CreatePhysicalDevice()
 
   if (s_oGlobalData.m_hPhysicalDevice == VK_NULL_HANDLE)
   {
-    THROW_GENERIC_EXCEPTION("[API] No device with graphics capabilities was found")
+    FATAL_ERROR("[API] No device with graphics capabilities was found");
   }
 
   s_oGlobalData.m_eMaxMsaaSampleCount = GetMaxMSAASampleCount();
 }
 
-void CreatePipeline(
-  const file::InFile& _oVSFile,
-  const file::InFile& _oPSFile,
-  const file::InFile* _pGSFile,
+// Destroys the shader module when leaving the scope, whatever the path
+struct ShaderModuleScope
+{
+  VkShaderModule h = VK_NULL_HANDLE;
+
+  ShaderModuleScope() = default;
+  ShaderModuleScope(const ShaderModuleScope&) = delete;
+  ShaderModuleScope& operator=(const ShaderModuleScope&) = delete;
+
+  ~ShaderModuleScope()
+  {
+    if (h != VK_NULL_HANDLE)
+    {
+      vkDestroyShaderModule(s_oGlobalData.m_oWindow.m_hDevice, h, NULL);
+    }
+  }
+};
+
+bool CreatePipeline(
+  const ShaderCode& _oVS,
+  const ShaderCode& _oPS,
+  const ShaderCode* _pGS,
   const RenderStateInfo& _oInfo,
   VkRenderPass _hRenderPass,
   VkSampleCountFlagBits _uMsaaSamples,
@@ -390,51 +406,63 @@ void CreatePipeline(
 
   VkShaderModuleCreateInfo oVSCreateInfo{};
   oVSCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-  oVSCreateInfo.codeSize = _oVSFile.GetSize();
-  oVSCreateInfo.pCode = reinterpret_cast<const uint32_t*>(_oVSFile.GetData());
+  oVSCreateInfo.codeSize = _oVS.zSize;
+  oVSCreateInfo.pCode = static_cast<const uint32_t*>(_oVS.pData);
 
-  VkShaderModule hVSShaderModule;
-  VK_CHECK(vkCreateShaderModule(s_oGlobalData.m_oWindow.m_hDevice, &oVSCreateInfo, NULL, &hVSShaderModule))
+  ShaderModuleScope oVSShaderModule;
+  if (!VK_OK(vkCreateShaderModule(s_oGlobalData.m_oWindow.m_hDevice, &oVSCreateInfo, NULL, &oVSShaderModule.h)))
+  {
+    oVSShaderModule.h = VK_NULL_HANDLE;
+    return false;
+  }
 
   aStages[0] = {};
   aStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   aStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-  aStages[0].module = hVSShaderModule;
+  aStages[0].module = oVSShaderModule.h;
   aStages[0].pName = "main";
 
  // Pixel stage
 
   VkShaderModuleCreateInfo oPSCreateInfo{};
   oPSCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-  oPSCreateInfo.codeSize = _oPSFile.GetSize();
-  oPSCreateInfo.pCode = reinterpret_cast<const uint32_t*>(_oPSFile.GetData());
+  oPSCreateInfo.codeSize = _oPS.zSize;
+  oPSCreateInfo.pCode = static_cast<const uint32_t*>(_oPS.pData);
 
-  VkShaderModule hPSShaderModule;
-  VK_CHECK(vkCreateShaderModule(s_oGlobalData.m_oWindow.m_hDevice, &oPSCreateInfo, NULL, &hPSShaderModule))
+  ShaderModuleScope oPSShaderModule;
+  if (!VK_OK(vkCreateShaderModule(s_oGlobalData.m_oWindow.m_hDevice, &oPSCreateInfo, NULL, &oPSShaderModule.h)))
+  {
+    oPSShaderModule.h = VK_NULL_HANDLE;
+    return false;
+  }
 
   aStages[1] = {};
   aStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   aStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-  aStages[1].module = hPSShaderModule;
+  aStages[1].module = oPSShaderModule.h;
   aStages[1].pName = "main";
 
   // Geometry stage
 
-  VkShaderModule hGSShaderModule = VK_NULL_HANDLE;
+  ShaderModuleScope oGSShaderModule;
 
-  if (_pGSFile)
+  if (_pGS)
   {
     VkShaderModuleCreateInfo oGSCreateInfo{};
     oGSCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    oGSCreateInfo.codeSize = _pGSFile->GetSize();
-    oGSCreateInfo.pCode = reinterpret_cast<const uint32_t*>(_pGSFile->GetData());
+    oGSCreateInfo.codeSize = _pGS->zSize;
+    oGSCreateInfo.pCode = static_cast<const uint32_t*>(_pGS->pData);
     
-    VK_CHECK(vkCreateShaderModule(s_oGlobalData.m_oWindow.m_hDevice, &oGSCreateInfo, NULL, &hGSShaderModule))
+    if (!VK_OK(vkCreateShaderModule(s_oGlobalData.m_oWindow.m_hDevice, &oGSCreateInfo, NULL, &oGSShaderModule.h)))
+    {
+      oGSShaderModule.h = VK_NULL_HANDLE;
+      return false;
+    }
 
     aStages[2] = {};
     aStages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     aStages[2].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
-    aStages[2].module = hGSShaderModule;
+    aStages[2].module = oGSShaderModule.h;
     aStages[2].pName = "main";
 
     uStageCount++;    
@@ -562,7 +590,8 @@ void CreatePipeline(
 
   if (_uAttachmentCount > MAX_RENDER_TARGET_COLOR_ATTACHMENTS)
   {
-    THROW_GENERIC_EXCEPTION("[API] Too many color attachments for a pipeline")
+    LogError("[Vulkan] Too many color attachments for a pipeline: %u (max %u)", _uAttachmentCount, MAX_RENDER_TARGET_COLOR_ATTACHMENTS);
+    return false;
   }
 
   VkPipelineColorBlendAttachmentState aBlendAttachments[MAX_RENDER_TARGET_COLOR_ATTACHMENTS] = {};
@@ -616,7 +645,13 @@ void CreatePipeline(
   oPipelineLayoutCreateInfo.pushConstantRangeCount = 1u;
   oPipelineLayoutCreateInfo.pPushConstantRanges = &push_constant;
 
-  VK_CHECK(vkCreatePipelineLayout(s_oGlobalData.m_oWindow.m_hDevice, &oPipelineLayoutCreateInfo, NULL, &_pRenderState_->m_hPipelineLayout))
+  // Left as VK_NULL_HANDLE on failure: DestroyRenderState skips them
+  VkPipelineLayout hPipelineLayout = VK_NULL_HANDLE;
+  if (!VK_OK(vkCreatePipelineLayout(s_oGlobalData.m_oWindow.m_hDevice, &oPipelineLayoutCreateInfo, NULL, &hPipelineLayout)))
+  {
+    return false;
+  }
+  _pRenderState_->m_hPipelineLayout = hPipelineLayout;
 
   // Create Pipeline object
 
@@ -639,14 +674,14 @@ void CreatePipeline(
   oPipelineInfo.basePipelineIndex = -1; // Optional
   oPipelineInfo.pDynamicState = &oDynamicState;
 
-  VK_CHECK(vkCreateGraphicsPipelines(s_oGlobalData.m_oWindow.m_hDevice, VK_NULL_HANDLE, 1u, &oPipelineInfo, NULL, &_pRenderState_->m_hGraphicsPipeline))
-
-  vkDestroyShaderModule(s_oGlobalData.m_oWindow.m_hDevice, hVSShaderModule, NULL);  
-  vkDestroyShaderModule(s_oGlobalData.m_oWindow.m_hDevice, hPSShaderModule, NULL);
-  if (hGSShaderModule != VK_NULL_HANDLE)
+  VkPipeline hPipeline = VK_NULL_HANDLE;
+  if (!VK_OK(vkCreateGraphicsPipelines(s_oGlobalData.m_oWindow.m_hDevice, VK_NULL_HANDLE, 1u, &oPipelineInfo, NULL, &hPipeline)))
   {
-    vkDestroyShaderModule(s_oGlobalData.m_oWindow.m_hDevice, hGSShaderModule, NULL);
+    return false;
   }
+  _pRenderState_->m_hGraphicsPipeline = hPipeline;
+
+  return true;
 
 }
 
@@ -711,7 +746,7 @@ void CreateLogicalDevice()
   std::vector<VkExtensionProperties> lstSupportedExtensions(uSupportedExtensionCount);
   vkEnumerateDeviceExtensionProperties(s_oGlobalData.m_hPhysicalDevice, nullptr, &uSupportedExtensionCount, lstSupportedExtensions.data());
 
-  for (int i = 0; i < uDeviceExtensionCount; i++)
+  for (uint32_t i = 0; i < uDeviceExtensionCount; i++)
   {
     bool found = false;
     for (const auto& ext : lstSupportedExtensions)
@@ -725,7 +760,7 @@ void CreateLogicalDevice()
 
     if (!found)
     {
-      THROW_GENERIC_EXCEPTION("Some extension not supported by this GPU!");
+      FATAL_ERROR("Some extension not supported by this GPU!");
     }
   }
 
@@ -760,7 +795,7 @@ void CreateLogicalDevice()
   oDeviceCreateInfo.pEnabledFeatures = &oEnabledFeatures;
   oDeviceCreateInfo.pNext = &oMultiviewFeatures;
 
-  VK_CHECK(vkCreateDevice(s_oGlobalData.m_hPhysicalDevice, &oDeviceCreateInfo, NULL, &s_oGlobalData.m_oWindow.m_hDevice))  
+  VK_CHECK_FATAL(vkCreateDevice(s_oGlobalData.m_hPhysicalDevice, &oDeviceCreateInfo, NULL, &s_oGlobalData.m_oWindow.m_hDevice));
 }
 
 void RetrieveQueues()
@@ -770,7 +805,7 @@ void RetrieveQueues()
 
   if (s_oGlobalData.m_oWindow.m_hRenderQueue == VK_NULL_HANDLE)
   {
-    THROW_GENERIC_EXCEPTION("[API] Could not get render queue. WTF Vulkan??")
+    FATAL_ERROR("[API] Could not get render queue. WTF Vulkan??");
   }
 
   const unsigned int uPresentQueueIdx = s_oGlobalData.m_uPresentQueueFamilyIdx == s_oGlobalData.m_uRenderQueueFamilyIdx ? 1 : 0;
@@ -779,7 +814,7 @@ void RetrieveQueues()
 
   if (s_oGlobalData.m_oWindow.m_hPresentQueue == VK_NULL_HANDLE)
   {
-    THROW_GENERIC_EXCEPTION("[API] Could not get presentation queue. WTF Vulkan??")
+    FATAL_ERROR("[API] Could not get presentation queue. WTF Vulkan??");
   }
 }
 
@@ -790,18 +825,18 @@ void CreateSurface()
   oCreateInfo.hwnd = s_oGlobalData.m_oWindow.m_hwnd;
   oCreateInfo.hinstance = GetModuleHandle(NULL);
 
-  VK_CHECK(vkCreateWin32SurfaceKHR(s_oGlobalData.m_hInstance, &oCreateInfo, NULL, &s_oGlobalData.m_oWindow.m_hSurface))
+  VK_CHECK_FATAL(vkCreateWin32SurfaceKHR(s_oGlobalData.m_hInstance, &oCreateInfo, NULL, &s_oGlobalData.m_oWindow.m_hSurface));
 
   VkBool32 bPresentSupported;
-  VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_uPresentQueueFamilyIdx, s_oGlobalData.m_oWindow.m_hSurface, &bPresentSupported))
+  VK_CHECK_FATAL(vkGetPhysicalDeviceSurfaceSupportKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_uPresentQueueFamilyIdx, s_oGlobalData.m_oWindow.m_hSurface, &bPresentSupported));
 
   if (bPresentSupported == VK_FALSE)
   {
-    THROW_GENERIC_EXCEPTION("[API] Device does not support presentation for window surface");
+    FATAL_ERROR("[API] Device does not support presentation for window surface");
   }
 
   VkSurfaceCapabilitiesKHR oSurfaceCapabilities;
-  VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &oSurfaceCapabilities))
+  VK_CHECK_FATAL(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &oSurfaceCapabilities));
 
     // Get swapchain number of images
     s_oGlobalData.m_oWindow.m_uSwapchainImageCount = oSurfaceCapabilities.minImageCount;
@@ -813,7 +848,7 @@ void CreateSurface()
 
 void CreateColorBuffer()
 {
-  CreateImage(
+  const bool bImageCreated = CreateImage(
       s_oGlobalData.m_oWindow.m_oExtent.width
     , s_oGlobalData.m_oWindow.m_oExtent.height
     , s_oGlobalData.m_oWindow.m_eSwapchainFormat
@@ -826,8 +861,10 @@ void CreateColorBuffer()
     , VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
     , s_oGlobalData.m_oWindow.m_hColorImage
     , s_oGlobalData.m_oWindow.m_hColorImageMemory);
+  FATAL_ASSERT_MSG(bImageCreated, "[Vulkan] Could not create the window color buffer (see log)");
 
-  CreateImageView(s_oGlobalData.m_oWindow.m_hColorImage, s_oGlobalData.m_oWindow.m_eSwapchainFormat, 0u, 1u, 0u, 1u, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, s_oGlobalData.m_oWindow.m_hColorImageView);
+  const bool bViewCreated = CreateImageView(s_oGlobalData.m_oWindow.m_hColorImage, s_oGlobalData.m_oWindow.m_eSwapchainFormat, 0u, 1u, 0u, 1u, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, s_oGlobalData.m_oWindow.m_hColorImageView);
+  FATAL_ASSERT_MSG(bViewCreated, "[Vulkan] Could not create the window color buffer view (see log)");
 }
 
 void CreateDepthBuffer()
@@ -836,7 +873,7 @@ void CreateDepthBuffer()
   VkFormat eFormat = VK_FORMAT_D32_SFLOAT;
   VkImageAspectFlags uAspectFlags = VK_IMAGE_ASPECT_DEPTH_BIT;
 
-  CreateImage(
+  const bool bImageCreated = CreateImage(
     s_oGlobalData.m_oWindow.m_oExtent.width,
     s_oGlobalData.m_oWindow.m_oExtent.height,
     eFormat,
@@ -849,8 +886,10 @@ void CreateDepthBuffer()
     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
     s_oGlobalData.m_oWindow.m_hDepthImage,
     s_oGlobalData.m_oWindow.m_hDepthImageMemory);
+  FATAL_ASSERT_MSG(bImageCreated, "[Vulkan] Could not create the window depth buffer (see log)");
 
-  CreateImageView( s_oGlobalData.m_oWindow.m_hDepthImage, eFormat, 0u, 1u, 0u, 1u, VK_IMAGE_VIEW_TYPE_2D, uAspectFlags, s_oGlobalData.m_oWindow.m_hDepthImageView);
+  const bool bViewCreated = CreateImageView( s_oGlobalData.m_oWindow.m_hDepthImage, eFormat, 0u, 1u, 0u, 1u, VK_IMAGE_VIEW_TYPE_2D, uAspectFlags, s_oGlobalData.m_oWindow.m_hDepthImageView);
+  FATAL_ASSERT_MSG(bViewCreated, "[Vulkan] Could not create the window depth buffer view (see log)");
 
   VkCommandBuffer hCmdBuffer = BeginTempCmdBuffer();
   TransitionImageLayout(hCmdBuffer, s_oGlobalData.m_oWindow.m_hDepthImage, eFormat, 0u, 1u, 0u, 1u, uAspectFlags, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
@@ -863,10 +902,10 @@ void CreateSwapchain()
 
   {
     uint32_t uSurfaceFormatCount = 0;
-    VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &uSurfaceFormatCount, NULL))
+    VK_CHECK_FATAL(vkGetPhysicalDeviceSurfaceFormatsKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &uSurfaceFormatCount, NULL));
 
       VkSurfaceFormatKHR* pSurfaceFormats = new VkSurfaceFormatKHR[uSurfaceFormatCount];
-    VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &uSurfaceFormatCount, pSurfaceFormats))
+    VK_CHECK_FATAL(vkGetPhysicalDeviceSurfaceFormatsKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &uSurfaceFormatCount, pSurfaceFormats));
 
       if (uSurfaceFormatCount == 1 && pSurfaceFormats[0].format == VK_FORMAT_UNDEFINED)
       {
@@ -880,7 +919,7 @@ void CreateSwapchain()
     s_oGlobalData.m_oWindow.m_eSwapchainColorSpace = pSurfaceFormats[0].colorSpace;
 
     s_oGlobalData.m_oWindow.m_eSwapchainFormat = pSurfaceFormats[0].format;
-    for (int i = 0; i < uSurfaceFormatCount; i++)
+    for (uint32_t i = 0; i < uSurfaceFormatCount; i++)
     {
       if (pSurfaceFormats[i].format == VK_FORMAT_B8G8R8A8_SRGB
         && pSurfaceFormats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
@@ -897,18 +936,18 @@ void CreateSwapchain()
   // Choose transform mode for swapchain
 
   VkSurfaceCapabilitiesKHR oSurfaceCapabilities;
-  VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &oSurfaceCapabilities))
+  VK_CHECK_FATAL(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &oSurfaceCapabilities));
 
     // Choose present mode for swapchain
 
     VkPresentModeKHR ePresentMode = VK_PRESENT_MODE_FIFO_KHR;
   {
     uint32_t uPresentModeCount = 0;
-    VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &uPresentModeCount, NULL))
+    VK_CHECK_FATAL(vkGetPhysicalDeviceSurfacePresentModesKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &uPresentModeCount, NULL));
       VkPresentModeKHR* pPresentModes = new VkPresentModeKHR[uPresentModeCount];
-    VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &uPresentModeCount, pPresentModes))
+    VK_CHECK_FATAL(vkGetPhysicalDeviceSurfacePresentModesKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &uPresentModeCount, pPresentModes));
 
-      for (int i = 0; i < uPresentModeCount; i++)
+      for (uint32_t i = 0; i < uPresentModeCount; i++)
       {
         if (pPresentModes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
         {
@@ -958,28 +997,28 @@ void CreateSwapchain()
     oSwapchainCreateInfo.pQueueFamilyIndices = aQueueFamilyIndices;
   }*/
 
-  uint32_t aQueueFamilyIndices[] = { s_oGlobalData.m_uPresentQueueFamilyIdx };
+
 
   oSwapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   oSwapchainCreateInfo.queueFamilyIndexCount = 0u;
   oSwapchainCreateInfo.pQueueFamilyIndices = NULL;
 
 
-  VK_CHECK(vkCreateSwapchainKHR(s_oGlobalData.m_oWindow.m_hDevice, &oSwapchainCreateInfo, NULL, &s_oGlobalData.m_oWindow.m_hSwapchain))
+  VK_CHECK_FATAL(vkCreateSwapchainKHR(s_oGlobalData.m_oWindow.m_hDevice, &oSwapchainCreateInfo, NULL, &s_oGlobalData.m_oWindow.m_hSwapchain));
 
     s_oGlobalData.m_oWindow.m_oExtent = oSurfaceCapabilities.currentExtent;
 
   // Get swapchain images
 
   s_oGlobalData.m_oWindow.m_uSwapchainImageCount = 0u;
-  VK_CHECK(vkGetSwapchainImagesKHR(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_hSwapchain, &s_oGlobalData.m_oWindow.m_uSwapchainImageCount, NULL))
+  VK_CHECK_FATAL(vkGetSwapchainImagesKHR(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_hSwapchain, &s_oGlobalData.m_oWindow.m_uSwapchainImageCount, NULL));
     s_oGlobalData.m_oWindow.m_pSwapchainImages = new VkImage[s_oGlobalData.m_oWindow.m_uSwapchainImageCount];
-  VK_CHECK(vkGetSwapchainImagesKHR(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_hSwapchain, &s_oGlobalData.m_oWindow.m_uSwapchainImageCount, s_oGlobalData.m_oWindow.m_pSwapchainImages))
+  VK_CHECK_FATAL(vkGetSwapchainImagesKHR(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_hSwapchain, &s_oGlobalData.m_oWindow.m_uSwapchainImageCount, s_oGlobalData.m_oWindow.m_pSwapchainImages));
 
     // Create views for swapchain images
 
     s_oGlobalData.m_oWindow.m_pSwapChainImageViews = new VkImageView[s_oGlobalData.m_oWindow.m_uSwapchainImageCount];
-  for (int i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
+  for (uint32_t i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
   {
     VkImageViewCreateInfo oCreateInfo = {};
     oCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -997,11 +1036,11 @@ void CreateSwapchain()
     oCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     oCreateInfo.format = s_oGlobalData.m_oWindow.m_eSwapchainFormat;
 
-    VK_CHECK(vkCreateImageView(s_oGlobalData.m_oWindow.m_hDevice, &oCreateInfo, NULL, &s_oGlobalData.m_oWindow.m_pSwapChainImageViews[i]))
+    VK_CHECK_FATAL(vkCreateImageView(s_oGlobalData.m_oWindow.m_hDevice, &oCreateInfo, NULL, &s_oGlobalData.m_oWindow.m_pSwapChainImageViews[i]));
   }
 }
 
-void CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool _bHasDepthStencil, VkFormat _eDepthStencilFormat, uint32_t _uMsaaSampleCount, VkRenderPass& hRenderPass_, bool _bOffscreen, bool _bMultiview)
+bool CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool _bHasDepthStencil, VkFormat _eDepthStencilFormat, uint32_t _uMsaaSampleCount, VkRenderPass& hRenderPass_, bool _bOffscreen, bool _bMultiview)
 {
 
   bool bHasMsaa = _uMsaaSampleCount > 1u;
@@ -1055,7 +1094,8 @@ void CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool 
 
   if (_uNumColorTextures > MAX_RENDER_TARGET_COLOR_ATTACHMENTS)
   {
-    THROW_GENERIC_EXCEPTION("[API] Too many color attachments for a render pass")
+    LogError("[Vulkan] Too many color attachments for a render pass: %u (max %u)", _uNumColorTextures, MAX_RENDER_TARGET_COLOR_ATTACHMENTS);
+    return false;
   }
 
   VkAttachmentReference aColorAttachmentRefs[MAX_RENDER_TARGET_COLOR_ATTACHMENTS] = {};
@@ -1097,14 +1137,14 @@ void CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool 
 
   uint32_t uAttachmentIdx = 0u;
 
-  for (int i = 0; i < _uNumColorTextures; i++)
+  for (uint32_t i = 0; i < _uNumColorTextures; i++)
   {
     aAttachments[uAttachmentIdx++] = oColorAttachmentDesc;
   }
 
   if (bHasMsaa)
   {
-    for (int i = 0; i < _uNumColorTextures; i++)
+    for (uint32_t i = 0; i < _uNumColorTextures; i++)
     {
       aAttachments[uAttachmentIdx++] = oColorResolveAttachmentDesc;
     }
@@ -1148,7 +1188,15 @@ void CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool 
     oRenderPassCreateInfo.pNext = &oRenderPassMultiViewCreateInfo;
   }
 
-  VK_CHECK(vkCreateRenderPass(s_oGlobalData.m_oWindow.m_hDevice, &oRenderPassCreateInfo, NULL, &hRenderPass_))
+  VkRenderPass hRenderPass = VK_NULL_HANDLE;
+  if (!VK_OK(vkCreateRenderPass(s_oGlobalData.m_oWindow.m_hDevice, &oRenderPassCreateInfo, NULL, &hRenderPass)))
+  {
+    hRenderPass_ = VK_NULL_HANDLE;
+    return false;
+  }
+
+  hRenderPass_ = hRenderPass;
+  return true;
 
 
 }
@@ -1160,7 +1208,7 @@ void CreateCommandBuffers()
   oCmdPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
   oCmdPoolCreateInfo.queueFamilyIndex = s_oGlobalData.m_uRenderQueueFamilyIdx;
   oCmdPoolCreateInfo.pNext = NULL;
-  VK_CHECK(vkCreateCommandPool(s_oGlobalData.m_oWindow.m_hDevice, &oCmdPoolCreateInfo, NULL, &s_oGlobalData.m_oWindow.m_hCmdPool))
+  VK_CHECK_FATAL(vkCreateCommandPool(s_oGlobalData.m_oWindow.m_hDevice, &oCmdPoolCreateInfo, NULL, &s_oGlobalData.m_oWindow.m_hCmdPool));
 
   s_oGlobalData.m_oWindow.m_pCmdBuffers = new VkCommandBuffer[s_oGlobalData.m_oWindow.m_uSwapchainImageCount];
 
@@ -1171,7 +1219,7 @@ void CreateCommandBuffers()
     oCmdBufferAllocInfo.commandPool = s_oGlobalData.m_oWindow.m_hCmdPool;
     oCmdBufferAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     oCmdBufferAllocInfo.commandBufferCount = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
-    VK_CHECK(vkAllocateCommandBuffers(s_oGlobalData.m_oWindow.m_hDevice, &oCmdBufferAllocInfo, s_oGlobalData.m_oWindow.m_pCmdBuffers))
+    VK_CHECK_FATAL(vkAllocateCommandBuffers(s_oGlobalData.m_oWindow.m_hDevice, &oCmdBufferAllocInfo, s_oGlobalData.m_oWindow.m_pCmdBuffers));
   }
 }
 
@@ -1191,11 +1239,11 @@ void CreateSyncObjects()
   oFenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
   oFenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-  for (int i = 0; i < uNumImages; i++)
+  for (uint32_t i = 0; i < uNumImages; i++)
   {
-    VK_CHECK(vkCreateSemaphore(s_oGlobalData.m_oWindow.m_hDevice, &oSemaphoreInfo, NULL, &s_oGlobalData.m_oWindow.m_pImageAvailableSemaphores[i]))
-    VK_CHECK(vkCreateSemaphore(s_oGlobalData.m_oWindow.m_hDevice, &oSemaphoreInfo, NULL, &s_oGlobalData.m_oWindow.m_pRenderFinishedSemaphores[i]))
-    VK_CHECK(vkCreateFence(s_oGlobalData.m_oWindow.m_hDevice, &oFenceInfo, NULL, &s_oGlobalData.m_oWindow.m_pInFlightFences[i]))
+    VK_CHECK_FATAL(vkCreateSemaphore(s_oGlobalData.m_oWindow.m_hDevice, &oSemaphoreInfo, NULL, &s_oGlobalData.m_oWindow.m_pImageAvailableSemaphores[i]));
+    VK_CHECK_FATAL(vkCreateSemaphore(s_oGlobalData.m_oWindow.m_hDevice, &oSemaphoreInfo, NULL, &s_oGlobalData.m_oWindow.m_pRenderFinishedSemaphores[i]));
+    VK_CHECK_FATAL(vkCreateFence(s_oGlobalData.m_oWindow.m_hDevice, &oFenceInfo, NULL, &s_oGlobalData.m_oWindow.m_pInFlightFences[i]));
   }
 }
 
@@ -1205,10 +1253,10 @@ void CreateDescriptorPool()
   VkDescriptorPoolSize aPoolSizes[2];
 
   aPoolSizes[0].descriptorCount = 999u;
-  aPoolSizes[0].uType = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  aPoolSizes[0].type = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 
   aPoolSizes[1].descriptorCount = 999u;
-  aPoolSizes[1].uType = VkDescriptorType::VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  aPoolSizes[1].type = VkDescriptorType::VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 
   VkDescriptorPoolCreateInfo oPoolInfo{};
   oPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1217,7 +1265,7 @@ void CreateDescriptorPool()
   oPoolInfo.poolSizeCount = 2u;
   oPoolInfo.pPoolSizes = aPoolSizes;
 
-  VK_CHECK(vkCreateDescriptorPool(s_oGlobalData.m_oWindow.m_hDevice, &oPoolInfo, NULL, &s_oGlobalData.m_oWindow.m_hDescPool))
+  VK_CHECK_FATAL(vkCreateDescriptorPool(s_oGlobalData.m_oWindow.m_hDevice, &oPoolInfo, NULL, &s_oGlobalData.m_oWindow.m_hDescPool));
 }
 
 void DestroySwapchain()
@@ -1234,7 +1282,7 @@ void DestroySwapchain()
   vkDestroyImage(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_hDepthImage, nullptr);
   vkFreeMemory(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_hDepthImageMemory, nullptr);
 
-  for (int i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
+  for (uint32_t i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
   {
     vkDestroyFramebuffer(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_pFramebuffers[i], NULL);
     vkDestroyImageView(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_pSwapChainImageViews[i], NULL);
@@ -1258,7 +1306,8 @@ void RecreateSwapchain()
   CreateSwapchain();
   
   // Recreate the render pass with the new swapchain format
-  CreateRenderPass(1u, s_oGlobalData.m_oWindow.m_eSwapchainFormat, true, VK_FORMAT_D32_SFLOAT, s_oGlobalData.m_oWindow.m_eMsaaSamples, s_oGlobalData.m_oWindow.m_hRenderPass, false);
+  const bool bRenderPassCreated = CreateRenderPass(1u, s_oGlobalData.m_oWindow.m_eSwapchainFormat, true, VK_FORMAT_D32_SFLOAT, s_oGlobalData.m_oWindow.m_eMsaaSamples, s_oGlobalData.m_oWindow.m_hRenderPass, false);
+  FATAL_ASSERT_MSG(bRenderPassCreated, "[Vulkan] Could not recreate the window render pass (see log)");
   
   // Cretae color buffer only if using msaa
   bool bMsaa = s_oGlobalData.m_oWindow.m_eMsaaSamples > 1u;
@@ -1270,7 +1319,7 @@ void RecreateSwapchain()
   CreateDepthBuffer();  
 
   // Create framebuffers for the swapchain images. If using msaa, the framebuffer will have both a color attachment (msaa) and a resolve attachment (swapchain image). Otherwise, the framebuffer will have only one color attachment (swapchain image)
-  for (int i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
+  for (uint32_t i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
   {
     uint32_t uAttachmentCount = 0u;
 
@@ -1292,7 +1341,7 @@ void RecreateSwapchain()
     oFramebufferInfo.height = s_oGlobalData.m_oWindow.m_oExtent.height;
     oFramebufferInfo.layers = 1;
 
-    VK_CHECK(vkCreateFramebuffer(s_oGlobalData.m_oWindow.m_hDevice, &oFramebufferInfo, NULL, &s_oGlobalData.m_oWindow.m_pFramebuffers[i]))
+    VK_CHECK_FATAL(vkCreateFramebuffer(s_oGlobalData.m_oWindow.m_hDevice, &oFramebufferInfo, NULL, &s_oGlobalData.m_oWindow.m_pFramebuffers[i]));
   }
 }
 
@@ -1310,18 +1359,21 @@ uint32_t FindMemoryType(uint32_t _uTypeFilter, VkMemoryPropertyFlags _uPropertie
     }
   }
 
-  THROW_GENERIC_EXCEPTION("Failed to find suitable memory type")
+  LogError("[Vulkan] No memory type with properties 0x%X in type filter 0x%X", _uProperties, _uTypeFilter);
+  return INVALID_MEMORY_TYPE;
 }
 
-void CreateBuffer(
+bool CreateBuffer(
     size_t _uSize
   , VkBufferUsageFlags _uUsage
   , VkMemoryPropertyFlags _uProperties
   , VkBuffer& hBuffer_
   , VkDeviceMemory& hDeviceMemory_)
 {
-
   VkDevice hDevice = s_oGlobalData.m_oWindow.m_hDevice;
+
+  hBuffer_ = VK_NULL_HANDLE;
+  hDeviceMemory_ = VK_NULL_HANDLE;
 
   VkBufferCreateInfo oBufferInfo{};
   oBufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1330,22 +1382,41 @@ void CreateBuffer(
   oBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   oBufferInfo.flags = 0u;
 
-  VK_CHECK(vkCreateBuffer(hDevice, &oBufferInfo, NULL, &hBuffer_))
+  // Handles are only written to the outputs once everything succeeded
+  VkBuffer hBuffer = VK_NULL_HANDLE;
+  if (!VK_OK(vkCreateBuffer(hDevice, &oBufferInfo, NULL, &hBuffer)))
+  {
+    return false;
+  }
 
-    VkMemoryRequirements oMemRequirements;
-  vkGetBufferMemoryRequirements(hDevice, hBuffer_, &oMemRequirements);
+  VkMemoryRequirements oMemRequirements;
+  vkGetBufferMemoryRequirements(hDevice, hBuffer, &oMemRequirements);
 
   VkMemoryAllocateInfo oAllocInfo{};
   oAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   oAllocInfo.allocationSize = oMemRequirements.size;
   oAllocInfo.memoryTypeIndex = FindMemoryType(oMemRequirements.memoryTypeBits, _uProperties);
 
-  VK_CHECK(vkAllocateMemory(hDevice, &oAllocInfo, NULL, &hDeviceMemory_));
+  VkDeviceMemory hMemory = VK_NULL_HANDLE;
+  if (oAllocInfo.memoryTypeIndex == INVALID_MEMORY_TYPE || !VK_OK(vkAllocateMemory(hDevice, &oAllocInfo, NULL, &hMemory)))
+  {
+    vkDestroyBuffer(hDevice, hBuffer, NULL);
+    return false;
+  }
 
-  VK_CHECK(vkBindBufferMemory(hDevice, hBuffer_, hDeviceMemory_, 0))
+  if (!VK_OK(vkBindBufferMemory(hDevice, hBuffer, hMemory, 0)))
+  {
+    vkFreeMemory(hDevice, hMemory, NULL);
+    vkDestroyBuffer(hDevice, hBuffer, NULL);
+    return false;
+  }
+
+  hBuffer_ = hBuffer;
+  hDeviceMemory_ = hMemory;
+  return true;
 }
 
-void CreateImage(
+bool CreateImage(
     uint32_t _uWidth
   , uint32_t _uHeight
   , VkFormat _eFormat
@@ -1354,11 +1425,16 @@ void CreateImage(
   , VkSampleCountFlagBits _eMsaaSampleCount
   , VkImageTiling _eTiling
   , VkImageUsageFlags _uUsage
-  , VkImageCreateFlags _uCreateFlags  
+  , VkImageCreateFlags _uCreateFlags
   , VkMemoryPropertyFlags _uProperties
   , VkImage& hImage_
   , VkDeviceMemory& hMemory_)
 {
+  VkDevice hDevice = s_oGlobalData.m_oWindow.m_hDevice;
+
+  hImage_ = VK_NULL_HANDLE;
+  hMemory_ = VK_NULL_HANDLE;
+
   VkImageCreateInfo oImageCreateInfo{};
 
   oImageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1376,32 +1452,53 @@ void CreateImage(
   oImageCreateInfo.samples = _eMsaaSampleCount;
   oImageCreateInfo.flags = _uCreateFlags;
 
-  VK_CHECK(vkCreateImage(s_oGlobalData.m_oWindow.m_hDevice, &oImageCreateInfo, NULL, &hImage_))
+  // Handles are only written to the outputs once everything succeeded
+  VkImage hImage = VK_NULL_HANDLE;
+  if (!VK_OK(vkCreateImage(hDevice, &oImageCreateInfo, NULL, &hImage)))
+  {
+    return false;
+  }
 
-    VkMemoryRequirements oMemRequirements;
-  vkGetImageMemoryRequirements(s_oGlobalData.m_oWindow.m_hDevice, hImage_, &oMemRequirements);
+  VkMemoryRequirements oMemRequirements;
+  vkGetImageMemoryRequirements(hDevice, hImage, &oMemRequirements);
 
   VkMemoryAllocateInfo oAllocInfo{};
   oAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   oAllocInfo.allocationSize = oMemRequirements.size;
   oAllocInfo.memoryTypeIndex = FindMemoryType(oMemRequirements.memoryTypeBits, _uProperties);
 
-  VK_CHECK(vkAllocateMemory(s_oGlobalData.m_oWindow.m_hDevice, &oAllocInfo, NULL, &hMemory_))
+  VkDeviceMemory hMemory = VK_NULL_HANDLE;
+  if (oAllocInfo.memoryTypeIndex == INVALID_MEMORY_TYPE || !VK_OK(vkAllocateMemory(hDevice, &oAllocInfo, NULL, &hMemory)))
+  {
+    vkDestroyImage(hDevice, hImage, NULL);
+    return false;
+  }
 
-    VK_CHECK(vkBindImageMemory(s_oGlobalData.m_oWindow.m_hDevice, hImage_, hMemory_, 0))
+  if (!VK_OK(vkBindImageMemory(hDevice, hImage, hMemory, 0)))
+  {
+    vkFreeMemory(hDevice, hMemory, NULL);
+    vkDestroyImage(hDevice, hImage, NULL);
+    return false;
+  }
+
+  hImage_ = hImage;
+  hMemory_ = hMemory;
+  return true;
 }
 
-void CreateImageView(
+bool CreateImageView(
     VkImage _hImage
   , VkFormat _eFormat
   , uint32_t _uBaseMip
-  , uint32_t _uMipLevels  
+  , uint32_t _uMipLevels
   , uint32_t _uBaseLayer
   , uint32_t _uLayers
   , VkImageViewType _eViewType
   , VkImageAspectFlags _uAspectFlags
   , VkImageView& hImageView_)
 {
+  hImageView_ = VK_NULL_HANDLE;
+
   VkImageViewCreateInfo oCreateInfo = {};
   oCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
   oCreateInfo.pNext = NULL;
@@ -1418,11 +1515,19 @@ void CreateImageView(
   oCreateInfo.viewType = _eViewType;
   oCreateInfo.format = _eFormat;
 
-  VK_CHECK(vkCreateImageView(s_oGlobalData.m_oWindow.m_hDevice, &oCreateInfo, NULL, &hImageView_))
+  VkImageView hImageView = VK_NULL_HANDLE;
+  if (!VK_OK(vkCreateImageView(s_oGlobalData.m_oWindow.m_hDevice, &oCreateInfo, NULL, &hImageView)))
+  {
+    return false;
+  }
+
+  hImageView_ = hImageView;
+  return true;
 }
 
-void CreateTextureSampler(Texture* _pTexture, uint32_t _uMipLevels, const SamplerConfig& _rSamplerConfig)
+bool CreateTextureSampler(Texture* _pTexture, uint32_t _uMipLevels, const SamplerConfig& _rSamplerConfig)
 {
+  _pTexture->m_hSampler = VK_NULL_HANDLE;
 
   VkPhysicalDeviceProperties oProperties{};
   vkGetPhysicalDeviceProperties(s_oGlobalData.m_hPhysicalDevice, &oProperties);
@@ -1447,7 +1552,14 @@ void CreateTextureSampler(Texture* _pTexture, uint32_t _uMipLevels, const Sample
   oSamplerInfo.magFilter = GetVkFilter(_rSamplerConfig.m_eMagFilterMode);
   oSamplerInfo.minFilter = GetVkFilter(_rSamplerConfig.m_eMinFilterMode);
 
-  VK_CHECK(vkCreateSampler(s_oGlobalData.m_oWindow.m_hDevice, &oSamplerInfo, NULL, &_pTexture->m_hSampler))
+  VkSampler hSampler = VK_NULL_HANDLE;
+  if (!VK_OK(vkCreateSampler(s_oGlobalData.m_oWindow.m_hDevice, &oSamplerInfo, NULL, &hSampler)))
+  {
+    return false;
+  }
+
+  _pTexture->m_hSampler = hSampler;
+  return true;
 }
 
 void DestroyBuffer(VkBuffer _hBuffer, VkDeviceMemory _hDeviceMemory_)
@@ -1456,51 +1568,52 @@ void DestroyBuffer(VkBuffer _hBuffer, VkDeviceMemory _hDeviceMemory_)
   vkFreeMemory(s_oGlobalData.m_oWindow.m_hDevice, _hDeviceMemory_, NULL);
 }
 
-void SetBufferData(const void* _pData, size_t _uSize, VkDeviceMemory& hDeviceMemory_)
+bool SetBufferData(const void* _pData, size_t _uSize, VkDeviceMemory& hDeviceMemory_)
 {
   VkDevice hDevice = s_oGlobalData.m_oWindow.m_hDevice;
-  void* pDeviceData;
-  VK_CHECK(vkMapMemory(hDevice, hDeviceMemory_, 0, _uSize, 0, &pDeviceData))
-    memcpy(pDeviceData, _pData, _uSize);
+  void* pDeviceData = nullptr;
+  if (!VK_OK(vkMapMemory(hDevice, hDeviceMemory_, 0, _uSize, 0, &pDeviceData)))
+  {
+    return false;
+  }
+  memcpy(pDeviceData, _pData, _uSize);
   vkUnmapMemory(hDevice, hDeviceMemory_);
+  return true;
 }
 
+// One-shot command buffers used during creation and setup. Allocating, submitting or
+// waiting on them only fails when the device itself is in trouble: fatal.
 VkCommandBuffer BeginTempCmdBuffer()
 {
-
   VkCommandBufferAllocateInfo oAllocInfo{};
   oAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
   oAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   oAllocInfo.commandPool = s_oGlobalData.m_oWindow.m_hCmdPool;
   oAllocInfo.commandBufferCount = 1;
 
-  VkCommandBuffer hCommandBuffer;
-  VK_CHECK(vkAllocateCommandBuffers(s_oGlobalData.m_oWindow.m_hDevice, &oAllocInfo, &hCommandBuffer))
+  VkCommandBuffer hCommandBuffer = VK_NULL_HANDLE;
+  VK_CHECK_FATAL(vkAllocateCommandBuffers(s_oGlobalData.m_oWindow.m_hDevice, &oAllocInfo, &hCommandBuffer));
 
-    VkCommandBufferBeginInfo oBeginInfo
-  {
-  };
+  VkCommandBufferBeginInfo oBeginInfo{};
   oBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   oBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-  VK_CHECK(vkBeginCommandBuffer(hCommandBuffer, &oBeginInfo))
+  VK_CHECK_FATAL(vkBeginCommandBuffer(hCommandBuffer, &oBeginInfo));
 
-    return hCommandBuffer;
+  return hCommandBuffer;
 }
 
 void EndTempCmdBuffer(VkCommandBuffer _hCmdBuffer)
 {
-  VK_CHECK(vkEndCommandBuffer(_hCmdBuffer))
+  VK_CHECK_FATAL(vkEndCommandBuffer(_hCmdBuffer));
 
-    VkSubmitInfo oSubmitInfo
-  {
-  };
+  VkSubmitInfo oSubmitInfo{};
   oSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   oSubmitInfo.commandBufferCount = 1;
   oSubmitInfo.pCommandBuffers = &_hCmdBuffer;
 
-  VK_CHECK(vkQueueSubmit(s_oGlobalData.m_oWindow.m_hRenderQueue, 1, &oSubmitInfo, VK_NULL_HANDLE))
-  VK_CHECK(vkQueueWaitIdle(s_oGlobalData.m_oWindow.m_hRenderQueue))
+  VK_CHECK_FATAL(vkQueueSubmit(s_oGlobalData.m_oWindow.m_hRenderQueue, 1, &oSubmitInfo, VK_NULL_HANDLE));
+  VK_CHECK_FATAL(vkQueueWaitIdle(s_oGlobalData.m_oWindow.m_hRenderQueue));
 
   vkFreeCommandBuffers(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_hCmdPool, 1u, &_hCmdBuffer);
 }
@@ -1567,14 +1680,17 @@ void GetLayoutAccessAndStage(VkImageLayout _eLayout, VkAccessFlags& uAccessMask_
     uStageMask_ = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     break;
   default:
-    THROW_GENERIC_EXCEPTION("[API] Unsupported layout in transition");
+    // Conservative barrier: correct for any layout, just slower
+    ASSERT_MSG_FORMAT(false, "[Vulkan] Unsupported layout %d in transition", static_cast<int>(_eLayout));
+    uAccessMask_ = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    uStageMask_ = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     break;
   }
 }
 
 void TransitionImageLayout(VkCommandBuffer _hCmdBuffer
   , VkImage _hImage
-  , VkFormat _eFormat
+  , VkFormat /*_eFormat*/
   , uint32_t _uBaseMip  
   , uint32_t _uMipLevels  
   , uint32_t _uBaseLayer
@@ -1614,7 +1730,7 @@ void TransitionTextureImageLayout(VkCommandBuffer _hCmdBuffer
   , uint32_t _uLayers
   , VkImageAspectFlags _uAspectFlags
   , VkImageLayout _eNewLayout
-  , bool _bForce)
+  , bool /*_bForce*/)
 {  
   // The top mip level + 1
   uint32_t uEndMipLevel = _uBaseMip + _uMipLevels;
@@ -1756,20 +1872,20 @@ void GetDescSetReflection(const RenderState* _pRenderState, PipelineStage _eStag
 
   if (pReflection->entry_point_name != nullptr)
   {
+    // CreateRenderState already validated these (ReflectSetLayouts): failing here is a bug
     SpvReflectResult eResult = spvReflectEnumerateEntryPointDescriptorSets(pReflection, "main", &uDescSetCount_, NULL);
-    if (eResult != SPV_REFLECT_RESULT_SUCCESS)
+    if (eResult != SPV_REFLECT_RESULT_SUCCESS || uDescSetCount_ > 4u)
     {
-      THROW_GENERIC_EXCEPTION("[API] Error: Failed to enumerate descriptor sets from shader: ")
-    }
-    if (uDescSetCount_ > 4u)
-    {
-      THROW_GENERIC_EXCEPTION("[API] Error: the shader has more than 4 descriptor sets : ")
+      ASSERT_MSG(false, "[Vulkan] Failed to enumerate descriptor sets from shader");
+      uDescSetCount_ = 0u;
+      return;
     }
 
     eResult = spvReflectEnumerateEntryPointDescriptorSets(pReflection, "main", &uDescSetCount_, aDescSets_);
     if (eResult != SPV_REFLECT_RESULT_SUCCESS)
     {
-      THROW_GENERIC_EXCEPTION("[API] Error: Failed to get descriptor sets from shader")
+      ASSERT_MSG(false, "[Vulkan] Failed to get descriptor sets from shader");
+      uDescSetCount_ = 0u;
     }
   }  
 }
@@ -1787,7 +1903,7 @@ void AddBufferToDescSetUpdater(ConstantBuffer* _pCBuffer, size_t _uSize, uint32_
   }
   else
   {   
-    for (int i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
+    for (uint32_t i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
     {
       VkDescriptorBufferInfo oBufferInfo{};
       oBufferInfo.buffer = _pCBuffer->m_pUniformBuffers[i];
@@ -1812,7 +1928,7 @@ void AddImageToDescSetUpdater(Texture* _pTexture, uint32_t uBinding, PipelineSta
   }
   else
   {
-    for (int i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
+    for (uint32_t i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
     {
       VkDescriptorImageInfo oImageInfo{};
       oImageInfo.sampler = _pTexture->m_hSampler;
@@ -1822,46 +1938,6 @@ void AddImageToDescSetUpdater(Texture* _pTexture, uint32_t uBinding, PipelineSta
       s_oGlobalData.m_oDescSetUpdater.AddImageInfo(std::move(oImageInfo), uBinding, i, _uStageFlags);
     }
   }
-}
-
-static void check_vk_result(VkResult err)
-{
-  if (err == 0)
-    return;
-  fprintf(stderr, "[vulkan] Error: VkResult = %d\n", err);
-  if (err < 0)
-    abort();
-}
-
-void SetupImGui()
-{
-  ImGui_ImplWin32_Init(s_oGlobalData.m_oWindow.m_hwnd);
-
-  VkSurfaceCapabilitiesKHR oSurfaceCapabilities;
-  VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_oGlobalData.m_hPhysicalDevice, s_oGlobalData.m_oWindow.m_hSurface, &oSurfaceCapabilities))
-
-  ImGui_ImplVulkan_InitInfo oImGuiInfo = {};
-  oImGuiInfo.Instance = s_oGlobalData.m_hInstance;
-  oImGuiInfo.PhysicalDevice = s_oGlobalData.m_hPhysicalDevice;
-  oImGuiInfo.Device = s_oGlobalData.m_oWindow.m_hDevice;
-  oImGuiInfo.QueueFamily = s_oGlobalData.m_uRenderQueueFamilyIdx;
-  oImGuiInfo.Queue = s_oGlobalData.m_oWindow.m_hRenderQueue;
-  oImGuiInfo.PipelineCache = VK_NULL_HANDLE;
-  oImGuiInfo.DescriptorPool = s_oGlobalData.m_oWindow.m_hDescPool;
-  oImGuiInfo.Subpass = 0;
-  oImGuiInfo.MinImageCount = oSurfaceCapabilities.minImageCount;
-  oImGuiInfo.ImageCount = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
-  oImGuiInfo.MSAASamples = s_oGlobalData.m_oWindow.m_eMsaaSamples;
-  oImGuiInfo.Allocator = nullptr;
-  oImGuiInfo.CheckVkResultFn = check_vk_result;
-  ImGui_ImplVulkan_Init(&oImGuiInfo, s_oGlobalData.m_oWindow.m_hRenderPass);
-
-  VkCommandBuffer hCmdBuffer = BeginTempCmdBuffer();
-  ImGui_ImplVulkan_CreateFontsTexture(hCmdBuffer);
-  EndTempCmdBuffer(hCmdBuffer);
-
-  ImGui_ImplVulkan_DestroyFontUploadObjects();
-  ImGui_ImplVulkan_DestroyFontUploadObjects();
 }
 
 } // namespace api

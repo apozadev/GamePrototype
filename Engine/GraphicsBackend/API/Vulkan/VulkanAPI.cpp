@@ -2,52 +2,35 @@
 #include <vector>
 #include <string>
 #include <cmath>
-#include <optional>
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
 #include "3rd/spirv-reflect/spirv_reflect.h"
 
-#include "imgui.h"
-#include "backends/imgui_impl_win32.h"
-#include "backends/imgui_impl_vulkan.h"
-
 #include "API/GraphicsAPI.h"
 
-#include "Exception.h"
+#include "Asserts.h"
 #include "API/Vulkan/Window.h"
 #include "BlendEnums.h"
 #include "API/Vulkan/APIInternal.h"
 #include "API/Vulkan/VulkanMacros.h"
 #include "API/Vulkan/VulkanShaderReflection.h"
 #include "APIAllocation.h"
-#include "APIBoundary.h"
 #include "Log.h"
 #include "API/Vulkan/ResourceLayout.h"
-#include "InFile.h"
+#include "ShaderCode.h"
 
 namespace api
 {
 
   // General
 
-  static void InitializeImpl()
+  void Initialize()
   {
 
     CreateInstance();
-    CreatePhysicalDevice();    
-
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-
-    ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls    
-  }
-
-  bool Initialize()
-  {
-    return CallOrFail("Initialize", [&] { InitializeImpl(); return true; });
+    CreatePhysicalDevice();
   }
 
   void ShutDown()
@@ -63,9 +46,8 @@ namespace api
 
   // Window
 
-  static Texture* CreateTextureImpl(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap);
 
-  static void CreateAPIWindowImpl(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples)
+  void CreateAPIWindow(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples)
   {
     bool bMsaa = _uMsaaSamples > 1u;
 
@@ -91,11 +73,12 @@ namespace api
     CreateSyncObjects();
     CreateDescriptorPool();
 
-    CreateRenderPass(1u, s_oGlobalData.m_oWindow.m_eSwapchainFormat, true, VK_FORMAT_D32_SFLOAT, s_oGlobalData.m_oWindow.m_eMsaaSamples, s_oGlobalData.m_oWindow.m_hRenderPass, false);
+    const bool bRenderPassCreated = CreateRenderPass(1u, s_oGlobalData.m_oWindow.m_eSwapchainFormat, true, VK_FORMAT_D32_SFLOAT, s_oGlobalData.m_oWindow.m_eMsaaSamples, s_oGlobalData.m_oWindow.m_hRenderPass, false);
+    FATAL_ASSERT_MSG(bRenderPassCreated, "[Vulkan] Could not create the window render pass (see log)");
 
     s_oGlobalData.m_oWindow.m_pFramebuffers = new VkFramebuffer[s_oGlobalData.m_oWindow.m_uSwapchainImageCount];
 
-    for (int i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
+    for (uint32_t i = 0; i < s_oGlobalData.m_oWindow.m_uSwapchainImageCount; i++)
     {
 
       uint32_t uAttachmentCount = 0u;
@@ -118,7 +101,7 @@ namespace api
       oFramebufferInfo.height = s_oGlobalData.m_oWindow.m_oExtent.height;
       oFramebufferInfo.layers = 1;
 
-      VK_CHECK(vkCreateFramebuffer(s_oGlobalData.m_oWindow.m_hDevice, &oFramebufferInfo, NULL, &s_oGlobalData.m_oWindow.m_pFramebuffers[i]))
+      VK_CHECK_FATAL(vkCreateFramebuffer(s_oGlobalData.m_oWindow.m_hDevice, &oFramebufferInfo, NULL, &s_oGlobalData.m_oWindow.m_pFramebuffers[i]));
     }    
 
     s_oGlobalData.m_oWindow.m_uCurrFrameIdx = 0u;
@@ -127,16 +110,8 @@ namespace api
     SamplerConfig oDummySamplerConfig = {};
     uint8_t aDummyBuffer[4] = { 255u, 20u, 0u, 255u};    
     void* pDummyBuffer = &(aDummyBuffer[0]);
-    // The throwing version: a window without its dummy texture is a failed window
-    s_oGlobalData.m_oWindow.m_pDummyTexture = CreateTextureImpl(_pAllocator, &pDummyBuffer, 1u, 1u, ImageFormat::R8G8B8A8, 1u, 1u, TextureUsage::SHADER_RESOURCE, oDummySamplerConfig, false);
-
-    // ImGui stuff
-    SetupImGui();
-  }
-
-  bool CreateAPIWindow(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples)
-  {
-    return CallOrFail("CreateAPIWindow", [&] { CreateAPIWindowImpl(_pAllocator, _hwnd, _uMsaaSamples); return true; });
+    s_oGlobalData.m_oWindow.m_pDummyTexture = CreateTexture(_pAllocator, &pDummyBuffer, 1u, 1u, ImageFormat::R8G8B8A8, 1u, 1u, TextureUsage::SHADER_RESOURCE, oDummySamplerConfig, false);
+    FATAL_ASSERT_MSG(s_oGlobalData.m_oWindow.m_pDummyTexture, "[Vulkan] Could not create the dummy texture (see log)");
   }
 
   bool IsWindowCreated()
@@ -188,7 +163,7 @@ namespace api
     oRange.baseArrayLayer = 0;
     oRange.layerCount = 1;
     
-    VkClearDepthStencilValue oDepthClearColor = { 1.f, 0.f };
+    VkClearDepthStencilValue oDepthClearColor = { 1.f, 0u };
     vkCmdClearDepthStencilImage(hCmdBuffer, s_oGlobalData.m_oWindow.m_hDepthImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &oDepthClearColor, 1u, &oRange);
 
     TransitionImageLayout(hCmdBuffer
@@ -304,23 +279,14 @@ namespace api
     
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
 
-    // Record dear imgui primitives into command buffer
-    ImGui::Render();
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx]);
-
-    vkCmdEndRenderPass(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx]);    
+    vkCmdEndRenderPass(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx]);
   }
 
-  static void DestroyWindowImpl()
+  void DestroyWindow()
   {
-
-    ImGui_ImplVulkan_Shutdown();
-    ImGui_ImplWin32_Shutdown();
-    ImGui::DestroyContext();
-
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
-    VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX))
+    VK_CHECK_FATAL(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX));
 
     DestroyTexture(s_oGlobalData.m_oWindow.m_pDummyTexture);
 
@@ -330,7 +296,7 @@ namespace api
 
     delete[] s_oGlobalData.m_oWindow.m_pFramebuffers;
 
-    for (int i = 0; i < uNumImages; i++)
+    for (uint32_t i = 0; i < uNumImages; i++)
     {
       vkDestroySemaphore(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_pImageAvailableSemaphores[i], NULL);
       vkDestroySemaphore(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_pRenderFinishedSemaphores[i], NULL);
@@ -355,120 +321,93 @@ namespace api
     vkDestroyDevice(s_oGlobalData.m_oWindow.m_hDevice, NULL); 
   }
 
-  void DestroyWindow()
-  {
-    CallOrFatal("DestroyWindow", [&] { DestroyWindowImpl(); });
-  }
-
   // Mesh
 
-  static Mesh* CreateMeshImpl(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t /*_uMeshConstantSize*/)
+  Mesh* CreateMesh(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t /*_uMeshConstantSize*/)
   {
     Mesh* pMesh = NewObject<Mesh>(_pAllocator);
 
-    VkCommandBuffer hCmdBuffer = BeginTempCmdBuffer();
+    const VkMemoryPropertyFlags uStagingProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-    VkBuffer hVertexStagingBuffer;
-    VkDeviceMemory hVertexStagingBufferMemory;
-    VkBuffer hIndexStagingBuffer;
-    VkDeviceMemory hIndexStagingBufferMemory;
+    VkBuffer hVertexStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory hVertexStagingBufferMemory = VK_NULL_HANDLE;
+    VkBuffer hIndexStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory hIndexStagingBufferMemory = VK_NULL_HANDLE;
 
-    // Create vertex buffer
-    {      
-      VkMemoryPropertyFlags uProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-      VkBufferUsageFlags uUsage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    // Everything that can fail happens before any command is recorded
+    const bool bCreated =
+      CreateBuffer(_uVertexDataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, uStagingProperties, hVertexStagingBuffer, hVertexStagingBufferMemory)
+      && SetBufferData(_pVertexData, _uVertexDataSize, hVertexStagingBufferMemory)
+      && CreateBuffer(_uVertexDataSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pMesh->m_hVertexBuffer, pMesh->m_hVertexBufferMemory)
+      && CreateBuffer(_uIndexDataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, uStagingProperties, hIndexStagingBuffer, hIndexStagingBufferMemory)
+      && SetBufferData(_pIndexData, _uIndexDataSize, hIndexStagingBufferMemory)
+      && CreateBuffer(_uIndexDataSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pMesh->m_hIndexBuffer, pMesh->m_hIndexBufferMemory);
 
-      CreateBuffer(_uVertexDataSize, uUsage, uProperties, hVertexStagingBuffer, hVertexStagingBufferMemory);
-      SetBufferData(_pVertexData, _uVertexDataSize, hVertexStagingBufferMemory);
-
-      uProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-      uUsage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-
-      CreateBuffer(_uVertexDataSize, uUsage, uProperties, pMesh->m_hVertexBuffer, pMesh->m_hVertexBufferMemory);
-
-      CopyBuffer(hCmdBuffer, hVertexStagingBuffer, pMesh->m_hVertexBuffer, _uVertexDataSize);      
-    }
-
-    // Create index buffer
+    if (bCreated)
     {
-      VkMemoryPropertyFlags uProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-      VkBufferUsageFlags uUsage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-
-      CreateBuffer(_uIndexDataSize, uUsage, uProperties, hIndexStagingBuffer, hIndexStagingBufferMemory);
-      SetBufferData(_pIndexData, _uIndexDataSize, hIndexStagingBufferMemory);
-
-      uProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-      uUsage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-
-      CreateBuffer(_uIndexDataSize, uUsage, uProperties, pMesh->m_hIndexBuffer, pMesh->m_hIndexBufferMemory);
-
-      CopyBuffer(hCmdBuffer, hIndexStagingBuffer, pMesh->m_hIndexBuffer, _uIndexDataSize);      
+      VkCommandBuffer hCmdBuffer = BeginTempCmdBuffer();
+      CopyBuffer(hCmdBuffer, hVertexStagingBuffer, pMesh->m_hVertexBuffer, _uVertexDataSize);
+      CopyBuffer(hCmdBuffer, hIndexStagingBuffer, pMesh->m_hIndexBuffer, _uIndexDataSize);
+      EndTempCmdBuffer(hCmdBuffer); // Waits for the copies
     }
 
-    EndTempCmdBuffer(hCmdBuffer);
+    // Done with the staging buffers either way (null handles are ignored)
+    DestroyBuffer(hVertexStagingBuffer, hVertexStagingBufferMemory);
+    DestroyBuffer(hIndexStagingBuffer, hIndexStagingBufferMemory);
 
-    vkDestroyBuffer(s_oGlobalData.m_oWindow.m_hDevice, hVertexStagingBuffer, NULL);
-    vkFreeMemory(s_oGlobalData.m_oWindow.m_hDevice, hVertexStagingBufferMemory, NULL);
-    vkDestroyBuffer(s_oGlobalData.m_oWindow.m_hDevice, hIndexStagingBuffer, NULL);
-    vkFreeMemory(s_oGlobalData.m_oWindow.m_hDevice, hIndexStagingBufferMemory, NULL);
+    if (!bCreated)
+    {
+      DestroyMesh(pMesh);
+      return nullptr;
+    }
 
     return pMesh;
   }
 
-  Mesh* CreateMesh(LinearAllocator* _pAllocator, const void* _pVertexData, size_t _uVertexDataSize, const void* _pIndexData, size_t _uIndexDataSize, size_t _uMeshConstantSize)
+  void DestroyMesh(Mesh* _pMesh)
   {
-    return CallOrFail("CreateMesh", [&] { return CreateMeshImpl(_pAllocator, _pVertexData, _uVertexDataSize, _pIndexData, _uIndexDataSize, _uMeshConstantSize); });
-  }
-
-  static void DestroyMeshImpl(Mesh* _pMesh)
-  {
-
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
-    VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX))
+    VK_CHECK_FATAL(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX));
 
+    // Null handles (half-built mesh) are ignored
     DestroyBuffer(_pMesh->m_hVertexBuffer, _pMesh->m_hVertexBufferMemory);
     DestroyBuffer(_pMesh->m_hIndexBuffer, _pMesh->m_hIndexBufferMemory);
 
     _pMesh->~Mesh();
   }
 
-  void DestroyMesh(Mesh* _pMesh)
-  {
-    CallOrFatal("DestroyMesh", [&] { DestroyMeshImpl(_pMesh); });
-  }
-
   // Constant buffer
 
-  static ConstantBuffer* CreateConstantBufferImpl(LinearAllocator* _pAllocator, size_t _uSize)
+  ConstantBuffer* CreateConstantBuffer(LinearAllocator* _pAllocator, size_t _uSize)
   {
     ConstantBuffer* pCBuffer = NewObject<ConstantBuffer>(_pAllocator);
-    
+
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
-    // Create buffers
-
+    // Zeroed: DestroyConstantBuffer skips whatever was not created
     pCBuffer->m_pUniformBuffers = NewArray<VkBuffer>(_pAllocator, uNumImages);
     pCBuffer->m_pUniformBuffersMemory = NewArray<VkDeviceMemory>(_pAllocator, uNumImages);
     pCBuffer->m_pUniformBuffersMapped = NewArray<void*>(_pAllocator, uNumImages);
 
     for (uint32_t i = 0; i < uNumImages; i++)
     {
-      CreateBuffer(_uSize,
+      const bool bCreated = CreateBuffer(_uSize,
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         pCBuffer->m_pUniformBuffers[i],
         pCBuffer->m_pUniformBuffersMemory[i]);
 
-      VK_CHECK(vkMapMemory(s_oGlobalData.m_oWindow.m_hDevice, pCBuffer->m_pUniformBuffersMemory[i], 0u, _uSize, 0u, &pCBuffer->m_pUniformBuffersMapped[i]))
+      void* pMapped = nullptr;
+      if (!bCreated || !VK_OK(vkMapMemory(s_oGlobalData.m_oWindow.m_hDevice, pCBuffer->m_pUniformBuffersMemory[i], 0u, _uSize, 0u, &pMapped)))
+      {
+        DestroyConstantBuffer(pCBuffer);
+        return nullptr;
+      }
+      pCBuffer->m_pUniformBuffersMapped[i] = pMapped;
     }
 
     return pCBuffer;
-  }
-
-  ConstantBuffer* CreateConstantBuffer(LinearAllocator* _pAllocator, size_t _uSize)
-  {
-    return CallOrFail("CreateConstantBuffer", [&] { return CreateConstantBufferImpl(_pAllocator, _uSize); });
   }
 
   void UpdateConstantBuffer(ConstantBuffer* _pCBuffer, const void* _pData, size_t _uSize)
@@ -486,15 +425,19 @@ namespace api
     }
   }
 
-  static void DestroyConstantBufferImpl(ConstantBuffer* _pCBuffer)
-  {       
+  void DestroyConstantBuffer(ConstantBuffer* _pCBuffer)
+  {
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
-    VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX))    
+    VK_CHECK_FATAL(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX));
 
     for (uint32_t i = 0; i < uNumImages; i++)
     {
-      vkUnmapMemory(s_oGlobalData.m_oWindow.m_hDevice, _pCBuffer->m_pUniformBuffersMemory[i]);
+      // Only what was created and mapped (CreateConstantBuffer can fail halfway)
+      if (_pCBuffer->m_pUniformBuffersMapped[i])
+      {
+        vkUnmapMemory(s_oGlobalData.m_oWindow.m_hDevice, _pCBuffer->m_pUniformBuffersMemory[i]);
+      }
       DestroyBuffer(_pCBuffer->m_pUniformBuffers[i], _pCBuffer->m_pUniformBuffersMemory[i]);
     }
 
@@ -502,20 +445,15 @@ namespace api
     _pCBuffer->~ConstantBuffer();
   }
 
-  void DestroyConstantBuffer(ConstantBuffer* _pCBuffer)
-  {
-    CallOrFatal("DestroyConstantBuffer", [&] { DestroyConstantBufferImpl(_pCBuffer); });
-  }
-
   // Texture
 
-  static Texture* CreateTextureImpl(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
+  Texture* CreateTexture(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
   {
 
     Texture* pTexture = NewObject<Texture>(_pAllocator);
 
     VkBuffer hStagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory hStagingBufferMemory;       
+    VkDeviceMemory hStagingBufferMemory = VK_NULL_HANDLE;
 
     size_t uSize = _uWidth * _uHeight * GetImageFormatSize(_eFormat);
 
@@ -526,7 +464,7 @@ namespace api
 
     pTexture->m_eFormat = GetVKFormat(_eFormat);
 
-    uint32_t uMaxMipLevels = static_cast<uint32_t>(std::floor(std::log2(max(_uWidth, _uWidth)))) + 1;
+    uint32_t uMaxMipLevels = static_cast<uint32_t>(std::floor(std::log2(max(_uWidth, _uHeight)))) + 1;
     _uMipLevels = _uMipLevels == 0u? uMaxMipLevels : min(_uMipLevels, uMaxMipLevels);
 
     uint32_t uLayers = _bIsCubemap ? 6u : 1u;
@@ -538,27 +476,37 @@ namespace api
 
     if (_ppData != nullptr)
     {
-      CreateBuffer(
+      bool bStaged = CreateBuffer(
           uSize
         , VK_BUFFER_USAGE_TRANSFER_SRC_BIT
         , VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
         , hStagingBuffer
         , hStagingBufferMemory);
 
-      if (_bIsCubemap)
+      if (bStaged && _bIsCubemap)
       {
         size_t uSizePerLayer = uSize / 6u;
-        void* pDeviceData;
-        VK_CHECK(vkMapMemory(s_oGlobalData.m_oWindow.m_hDevice, hStagingBufferMemory, 0, uSize, 0, &pDeviceData))
-        for (size_t i = 0u; i < 6u; i++)
-        {          
-          memcpy(static_cast<char*>(pDeviceData) + uSizePerLayer * i, *(_ppData + i), uSizePerLayer);
+        void* pDeviceData = nullptr;
+        bStaged = VK_OK(vkMapMemory(s_oGlobalData.m_oWindow.m_hDevice, hStagingBufferMemory, 0, uSize, 0, &pDeviceData));
+        if (bStaged)
+        {
+          for (size_t i = 0u; i < 6u; i++)
+          {
+            memcpy(static_cast<char*>(pDeviceData) + uSizePerLayer * i, *(_ppData + i), uSizePerLayer);
+          }
+          vkUnmapMemory(s_oGlobalData.m_oWindow.m_hDevice, hStagingBufferMemory);
         }
-        vkUnmapMemory(s_oGlobalData.m_oWindow.m_hDevice, hStagingBufferMemory);
       }
-      else
+      else if (bStaged)
       {
-        SetBufferData(*_ppData, uSize, hStagingBufferMemory);
+        bStaged = SetBufferData(*_ppData, uSize, hStagingBufferMemory);
+      }
+
+      if (!bStaged)
+      {
+        DestroyBuffer(hStagingBuffer, hStagingBufferMemory);
+        DestroyTexture(pTexture);
+        return nullptr;
       }
     }
 
@@ -579,7 +527,7 @@ namespace api
       uUsageFlags |= VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
     }*/
 
-    CreateImage(
+    const bool bImageCreated = CreateImage(
         _uWidth
       , _uHeight
       , pTexture->m_eFormat
@@ -592,6 +540,13 @@ namespace api
       , VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT      
       , pTexture->m_hImage
       , pTexture->m_hMemory);
+
+    if (!bImageCreated)
+    {
+      DestroyBuffer(hStagingBuffer, hStagingBufferMemory);
+      DestroyTexture(pTexture);
+      return nullptr;
+    }
 
     uint32_t uAspectFlags = 0u;
 
@@ -666,7 +621,7 @@ namespace api
       DestroyBuffer(hStagingBuffer, hStagingBufferMemory);
     }
 
-    CreateImageView(
+    const bool bViewCreated = CreateImageView(
         pTexture->m_hImage
       , pTexture->m_eFormat
       , 0u, _uMipLevels
@@ -675,17 +630,14 @@ namespace api
       , uAspectFlags
       , pTexture->m_hImageView);
 
-    if ((_uUsage & TextureUsage::SHADER_RESOURCE) != 0u)
+    const bool bNeedsSampler = (_uUsage & TextureUsage::SHADER_RESOURCE) != 0u;
+    if (!bViewCreated || (bNeedsSampler && !CreateTextureSampler(pTexture, _uMipLevels, _rSamplerConfig)))
     {
-      CreateTextureSampler(pTexture, _uMipLevels, _rSamplerConfig);
-    }      
+      DestroyTexture(pTexture);
+      return nullptr;
+    }
 
     return pTexture;
-  }
-
-  Texture* CreateTexture(LinearAllocator* _pAllocator, const void* const* _ppData, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, uint32_t _uMipLevels, uint32_t _uMsaaSamples, uint32_t _uUsage, const SamplerConfig& _rSamplerConfig, bool _bIsCubemap)
-  {
-    return CallOrFail("CreateTexture", [&] { return CreateTextureImpl(_pAllocator, _ppData, _uWidth, _uHeight, _eFormat, _uMipLevels, _uMsaaSamples, _uUsage, _rSamplerConfig, _bIsCubemap); });
   }
 
   void GenerateMipMaps(Texture* _pTexture)
@@ -725,7 +677,7 @@ namespace api
 
   }
 
-  static void ClearTextureImpl(Texture* _pTexture, TextureUsage _eUsage)
+  void ClearTexture(Texture* _pTexture, TextureUsage _eUsage)
   {    
 
     uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
@@ -741,8 +693,8 @@ namespace api
       uAspectFlags = VK_IMAGE_ASPECT_COLOR_BIT;
       break;
     default:
-      THROW_GENERIC_EXCEPTION("[API] [VK] Invalid usage flag in ClearAPITexture")
-      break;
+      ASSERT_MSG(false, "[Vulkan] ClearTexture: usage must be COLOR_TARGET or DEPTH_TARGET");
+      return;
     }
 
     VkCommandBuffer hCmdBuffer = s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx];
@@ -763,7 +715,7 @@ namespace api
 
     if (_eUsage == TextureUsage::DEPTH_TARGET)
     {
-      VkClearDepthStencilValue oClearColor = { 1.f, 0.f };
+      VkClearDepthStencilValue oClearColor = { 1.f, 0u };
       vkCmdClearDepthStencilImage(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], 
         _pTexture->m_hImage, 
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 
@@ -794,27 +746,21 @@ namespace api
       eFinalLayout);    
   }
 
-  void ClearTexture(Texture* _pTexture, TextureUsage _eUsage)
-  {
-    CallOrFatal("ClearTexture", [&] { ClearTextureImpl(_pTexture, _eUsage); });
-  }
-
-  static void BlitTextureImpl(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
+  void BlitTexture(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
   {    
 
-    if (_rSrcSubResource.m_uMipLevels != _rDstSubResource.m_uMipLevels || _rSrcSubResource.m_uLayers != _rDstSubResource.m_uLayers)
+    // Invalid blits are programming errors: assert and skip
+    const bool bCountsMatch = _rSrcSubResource.m_uMipLevels == _rDstSubResource.m_uMipLevels && _rSrcSubResource.m_uLayers == _rDstSubResource.m_uLayers;
+    const bool bMipsInRange = (_rSrcSubResource.m_uBaseMip + _rSrcSubResource.m_uMipLevels) <= _pSrcTexture->m_uMipLevels
+      && (_rDstSubResource.m_uBaseMip + _rDstSubResource.m_uMipLevels) <= _pDstTexture->m_uMipLevels;
+    const bool bLayersInRange = (_rSrcSubResource.m_uBaseLayer + _rSrcSubResource.m_uLayers) <= _pSrcTexture->m_uLayers
+      && (_rDstSubResource.m_uBaseLayer + _rDstSubResource.m_uLayers) <= _pDstTexture->m_uLayers;
+    ASSERT_MSG(bCountsMatch, "BlitTexture: subresource mip level count and layer count must match");
+    ASSERT_MSG(bMipsInRange, "BlitTexture: subresource mip levels are outside of the texture mip level range");
+    ASSERT_MSG(bLayersInRange, "BlitTexture: subresource array layers are outside of the texture array layer range");
+    if (!bCountsMatch || !bMipsInRange || !bLayersInRange)
     {
-      THROW_GENERIC_EXCEPTION("BlitAPITexture: Subresource Mip level count and layer count must match");
-    }
-    else if ((_rSrcSubResource.m_uBaseMip + _rSrcSubResource.m_uMipLevels) > _pSrcTexture->m_uMipLevels &&
-      (_rDstSubResource.m_uBaseMip + _rDstSubResource.m_uMipLevels) > _pDstTexture->m_uMipLevels)
-    {
-      THROW_GENERIC_EXCEPTION("BlitAPITexture: Subresource Mip levels are outside of the texure mip level range");
-    }
-    else if ((_rSrcSubResource.m_uBaseLayer + _rSrcSubResource.m_uLayers) > _pSrcTexture->m_uLayers &&
-      (_rDstSubResource.m_uBaseLayer + _rDstSubResource.m_uLayers) > _pDstTexture->m_uLayers)
-    {
-      THROW_GENERIC_EXCEPTION("BlitAPITexture: Subresource array layers are outside of the texure array layers range");
+      return;
     }
 
     VkCommandBuffer& hCmdBuffer = s_oGlobalData.m_oWindow.m_pCmdBuffers[s_oGlobalData.m_oWindow.m_uCurrFrameIdx];
@@ -879,28 +825,19 @@ namespace api
       , eDstOldLayout);
   }
 
-  void BlitTexture(Texture* _pSrcTexture, const TextureSubResource& _rSrcSubResource, Texture* _pDstTexture, const TextureSubResource& _rDstSubResource)
-  {
-    CallOrFatal("BlitTexture", [&] { BlitTextureImpl(_pSrcTexture, _rSrcSubResource, _pDstTexture, _rDstSubResource); });
-  }
-
-  static void DestroyTextureImpl(Texture* _pTexture)
+  void DestroyTexture(Texture* _pTexture)
   {
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
-    VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX))
+    VK_CHECK_FATAL(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX));
 
+    // Null handles (half-built texture) are ignored
     vkDestroySampler(s_oGlobalData.m_oWindow.m_hDevice, _pTexture->m_hSampler, NULL);
     vkDestroyImageView(s_oGlobalData.m_oWindow.m_hDevice, _pTexture->m_hImageView, NULL);
     vkDestroyImage(s_oGlobalData.m_oWindow.m_hDevice, _pTexture->m_hImage, NULL);
     vkFreeMemory(s_oGlobalData.m_oWindow.m_hDevice, _pTexture->m_hMemory, NULL);
 
     _pTexture->~Texture();
-  }
-
-  void DestroyTexture(Texture* _pTexture)
-  {
-    CallOrFatal("DestroyTexture", [&] { DestroyTextureImpl(_pTexture); });
   }
 
   // RenderTarget
@@ -912,7 +849,7 @@ namespace api
     return pRenderTarget;
   }
 
-  void BeginRenderTargetSetup(RenderTarget* _pRenderTarget, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, ImageFormat _eDepthStencilFormat, uint32_t _uMsaaSamples, bool _isCubemap)
+  void BeginRenderTargetSetup(RenderTarget* _pRenderTarget, uint32_t _uWidth, uint32_t _uHeight, ImageFormat _eFormat, ImageFormat _eDepthStencilFormat, uint32_t _uMsaaSamples, bool /*_isCubemap*/)
   {
     s_oGlobalData.m_oRenderTargetBuilder.SetRenderTarget(_pRenderTarget);
     s_oGlobalData.m_oRenderTargetBuilder.m_eColorFormat = GetVKFormat(_eFormat);
@@ -937,15 +874,11 @@ namespace api
     s_oGlobalData.m_oRenderTargetBuilder.AddResolveColorTexture(_pTexture);
   }
 
-  static void EndRenderTargetSetupImpl()
-  {
-    s_oGlobalData.m_oRenderTargetBuilder.Build();
-    s_oGlobalData.m_oRenderTargetBuilder.Clear();
-  }
-
   bool EndRenderTargetSetup()
   {
-    return CallOrFail("EndRenderTargetSetup", [&] { EndRenderTargetSetupImpl(); return true; });
+    const bool bBuilt = s_oGlobalData.m_oRenderTargetBuilder.Build();
+    s_oGlobalData.m_oRenderTargetBuilder.Clear();
+    return bBuilt;
   }
 
   void ClearRenderTarget(RenderTarget* /*_pRenderTarget*/)
@@ -1041,32 +974,31 @@ namespace api
     }
   }
 
-  static void DestroyRenderTargetImpl(RenderTarget* _pRenderTarget)
+  void DestroyRenderTarget(RenderTarget* _pRenderTarget)
   {
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
-    VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX))
+    VK_CHECK_FATAL(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX));
 
     vkDestroyFramebuffer(s_oGlobalData.m_oWindow.m_hDevice, _pRenderTarget->m_hFrameBuffer, nullptr);
 
     vkDestroyRenderPass(s_oGlobalData.m_oWindow.m_hDevice, _pRenderTarget->m_hRenderPass, nullptr);
 
-    for (uint32_t i = 0; i < _pRenderTarget->m_uAttachmentCount; i++)
+    // Every view the builder created (color, resolve and depth), even if it failed halfway
+    for (uint32_t i = 0; i < MAX_RENDER_TARGET_ATTACHMENTS; i++)
     {
-      vkDestroyImageView(s_oGlobalData.m_oWindow.m_hDevice, _pRenderTarget->m_aImageViews[i], nullptr);
+      if (_pRenderTarget->m_aImageViews[i] != VK_NULL_HANDLE)
+      {
+        vkDestroyImageView(s_oGlobalData.m_oWindow.m_hDevice, _pRenderTarget->m_aImageViews[i], nullptr);
+      }
     }
 
     _pRenderTarget->~RenderTarget();
   }
 
-  void DestroyRenderTarget(RenderTarget* _pRenderTarget)
-  {
-    CallOrFatal("DestroyRenderTarget", [&] { DestroyRenderTargetImpl(_pRenderTarget); });
-  }
-
   // Render state
 
-  static RenderState* CreateRenderStateImpl(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* _pRenderTarget, uint32_t _uMsaaSamples)
+  RenderState* CreateRenderState(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* _pRenderTarget, uint32_t _uMsaaSamples)
   {
 
     VkRenderPass hRenderPass = VK_NULL_HANDLE;
@@ -1082,49 +1014,46 @@ namespace api
 
     RenderState* pRenderState = NewObject<RenderState>(_pAllocator);
 
-    uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;    
+    // The SPIR-V is only needed while creating the render state
+    ScopedRollback oShaderCode(_pAllocator);
 
-    file::InFile oVSFile(_oInfo.m_sVSFilename.data());
-    file::InFile oPSFile(_oInfo.m_sPSFilename.data());
-    if (!oVSFile.GetData() || !oPSFile.GetData())
+    ShaderCode oVS;
+    ShaderCode oPS;
+    if (!LoadShaderCode(_pAllocator, _oInfo.m_sVSFilename.data(), oVS) || !LoadShaderCode(_pAllocator, _oInfo.m_sPSFilename.data(), oPS))
     {
-      THROW_GENERIC_EXCEPTION("[API] Missing shader file")
+      DestroyRenderState(pRenderState);
+      return nullptr;
     }
-    
-    SpvReflectResult eResult = spvReflectCreateShaderModule(oVSFile.GetSize(), static_cast<void*>(oVSFile.GetData()), &(pRenderState->m_oVertexReflection));
-    if (eResult != SPV_REFLECT_RESULT_SUCCESS)
-    {
-      THROW_GENERIC_EXCEPTION("[API] Error: Unable to load vertex shader reflection")
-    }    
 
-    eResult = spvReflectCreateShaderModule(oPSFile.GetSize(), static_cast<void*>(oPSFile.GetData()), &(pRenderState->m_oPixelReflection));
-    if (eResult != SPV_REFLECT_RESULT_SUCCESS)
+    if (spvReflectCreateShaderModule(oVS.zSize, oVS.pData, &(pRenderState->m_oVertexReflection)) != SPV_REFLECT_RESULT_SUCCESS
+      || spvReflectCreateShaderModule(oPS.zSize, oPS.pData, &(pRenderState->m_oPixelReflection)) != SPV_REFLECT_RESULT_SUCCESS)
     {
-      THROW_GENERIC_EXCEPTION("[API] Error: Unable to load pixel shader reflection")
-    }    
-    
-    ReflectSetLayouts(pRenderState->m_oVertexReflection, pRenderState->m_aLayoutBuilders);
-    ReflectSetLayouts(pRenderState->m_oPixelReflection, pRenderState->m_aLayoutBuilders);
+      LogError("[Vulkan] Unable to load shader reflection: %s / %s", _oInfo.m_sVSFilename.data(), _oInfo.m_sPSFilename.data());
+      DestroyRenderState(pRenderState);
+      return nullptr;
+    }
 
-    // Destroyed on scope exit even if something below throws
-    std::optional<file::InFile> oGSFile;
-    file::InFile* pGSFile = nullptr;
+    if (!ReflectSetLayouts(pRenderState->m_oVertexReflection, pRenderState->m_aLayoutBuilders)
+      || !ReflectSetLayouts(pRenderState->m_oPixelReflection, pRenderState->m_aLayoutBuilders))
+    {
+      DestroyRenderState(pRenderState);
+      return nullptr;
+    }
+
+    ShaderCode oGS;
+    const ShaderCode* pGS = nullptr;
 
     if (!_oInfo.m_sGSFilename.empty())
     {      
-      pGSFile = &oGSFile.emplace(_oInfo.m_sGSFilename.data());
-      if (!pGSFile->GetData())
+      pGS = &oGS;
+      if (!LoadShaderCode(_pAllocator, _oInfo.m_sGSFilename.data(), oGS)
+        || spvReflectCreateShaderModule(oGS.zSize, oGS.pData, &(pRenderState->m_oGeomReflection)) != SPV_REFLECT_RESULT_SUCCESS
+        || !ReflectSetLayouts(pRenderState->m_oGeomReflection, pRenderState->m_aLayoutBuilders))
       {
-        THROW_GENERIC_EXCEPTION("[API] Missing geometry shader file")
+        LogError("[Vulkan] Unable to load geometry shader: %s", _oInfo.m_sGSFilename.data());
+        DestroyRenderState(pRenderState);
+        return nullptr;
       }
-
-      eResult = spvReflectCreateShaderModule(pGSFile->GetSize(), static_cast<void*>(pGSFile->GetData()), &(pRenderState->m_oGeomReflection));
-      if (eResult != SPV_REFLECT_RESULT_SUCCESS)
-      {
-        THROW_GENERIC_EXCEPTION("[API] Error: Unable to load geometry shader reflection")
-      }
-
-      ReflectSetLayouts(pRenderState->m_oGeomReflection, pRenderState->m_aLayoutBuilders);
     }      
 
     for (int i = 0; i < MAX_DESCRIPTOR_SET_LAYOUTS; i++)
@@ -1132,6 +1061,11 @@ namespace api
       if (pRenderState->m_aLayoutBuilders[i].GetDescriptors().size() > 0u)
       {
         pRenderState->m_aDescriptorSetLayouts[i] = pRenderState->m_aLayoutBuilders[i].Build(s_oGlobalData.m_oWindow.m_hDevice);
+        if (pRenderState->m_aDescriptorSetLayouts[i] == VK_NULL_HANDLE)
+        {
+          DestroyRenderState(pRenderState);
+          return nullptr;
+        }
       }
       else
       {
@@ -1141,15 +1075,14 @@ namespace api
 
     uint32_t uNumAttachments = _pRenderTarget != nullptr ? _pRenderTarget->m_uAttachmentCount : 1u;
     
-    CreatePipeline(oVSFile, oPSFile, pGSFile, _oInfo, hRenderPass, static_cast<VkSampleCountFlagBits>(_uMsaaSamples), uNumAttachments, pRenderState);
+    if (!CreatePipeline(oVS, oPS, pGS, _oInfo, hRenderPass, static_cast<VkSampleCountFlagBits>(_uMsaaSamples), uNumAttachments, pRenderState))
+    {
+      DestroyRenderState(pRenderState);
+      return nullptr;
+    }
 
     
     return pRenderState;
-  }
-
-  RenderState* CreateRenderState(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo, const RenderTarget* _pRenderTarget, uint32_t _uMsaaSamples)
-  {
-    return CallOrFail("CreateRenderState", [&] { return CreateRenderStateImpl(_pAllocator, _oInfo, _pRenderTarget, _uMsaaSamples); });
   }
 
   void BindRenderState(RenderState* _pAPIRenderState)
@@ -1159,18 +1092,16 @@ namespace api
     vkCmdBindPipeline(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], VK_PIPELINE_BIND_POINT_GRAPHICS, _pAPIRenderState->m_hGraphicsPipeline);    
   }
 
-  static void DestroyRenderStateImpl(RenderState* _pAPIRenderState)
+  void DestroyRenderState(RenderState* _pAPIRenderState)
   {
     const uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
-    VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX))
+    VK_CHECK_FATAL(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, uNumImages, s_oGlobalData.m_oWindow.m_pInFlightFences, VK_TRUE, UINT64_MAX));
 
-    spvReflectDestroyShaderModule(&_pAPIRenderState->m_oVertexReflection);    
+    // Each one is a no-op if it was never created (half-built render state)
+    spvReflectDestroyShaderModule(&_pAPIRenderState->m_oVertexReflection);
     spvReflectDestroyShaderModule(&_pAPIRenderState->m_oPixelReflection);
-    if (_pAPIRenderState->m_oGeomReflection.entry_point_name != nullptr)
-    {
-      spvReflectDestroyShaderModule(&_pAPIRenderState->m_oGeomReflection);
-    }
+    spvReflectDestroyShaderModule(&_pAPIRenderState->m_oGeomReflection);
 
     for (int i = 0; i < MAX_DESCRIPTOR_SET_LAYOUTS; i++)
     {
@@ -1188,14 +1119,9 @@ namespace api
     _pAPIRenderState->~RenderState();
   }    
 
-  void DestroyRenderState(RenderState* _pAPIRenderState)
-  {
-    CallOrFatal("DestroyRenderState", [&] { DestroyRenderStateImpl(_pAPIRenderState); });
-  }
-
   // SHader reflection
 
-  static uint32_t GetConstantBufferCountImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage)
+  uint32_t GetConstantBufferCount(const RenderState* _pAPIRenderState, PipelineStage _eStage)
   {
     uint32_t uCBufferCount = 0u;
 
@@ -1214,7 +1140,7 @@ namespace api
         {
           SpvReflectDescriptorBinding* pDesc = pDescSet->bindings[j];
 
-          if (pDesc->descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+          if (pDesc->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
           {
             uCBufferCount++;
           }
@@ -1225,17 +1151,12 @@ namespace api
     return uCBufferCount;
   }
 
-  uint32_t GetConstantBufferCount(const RenderState* _pAPIRenderState, PipelineStage _eStage)
-  {
-    return CallOrFail("GetConstantBufferCount", [&] { return GetConstantBufferCountImpl(_pAPIRenderState, _eStage); });
-  }
-
-  uint32_t GetTextureCount(const RenderState* _pAPIRenderState, PipelineStage _eStage)
+  uint32_t GetTextureCount(const RenderState* /*_pAPIRenderState*/, PipelineStage /*_eStage*/)
   {
     return 0u;
   }
 
-  static const char* GetConstantBufferNameImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  const char* GetConstantBufferName(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
   {
     uint32_t uDescSetCount = 0u;
     SpvReflectDescriptorSet* aDescSets[4];
@@ -1254,7 +1175,7 @@ namespace api
         {
           SpvReflectDescriptorBinding* pDesc = pDescSet->bindings[j];
 
-          if (pDesc->descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+          if (pDesc->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
           {
             if (uCurrIdx == _uIdx)
             {
@@ -1267,22 +1188,17 @@ namespace api
       }
     }
 
-    THROW_GENERIC_EXCEPTION("[API] Constant buffer not found by index");
+    ASSERT_MSG(false, "[Vulkan] Constant buffer not found by index");
 
     return "";
   }
 
-  const char* GetConstantBufferName(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
-  {
-    return CallOrFail("GetConstantBufferName", [&] { return GetConstantBufferNameImpl(_pAPIRenderState, _eStage, _uIdx); });
-  }
-
-  const char* GetTextureName(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  const char* GetTextureName(const RenderState* /*_pAPIRenderState*/, PipelineStage /*_eStage*/, uint32_t /*_uIdx*/)
   {
     return nullptr;
   }
 
-  static uint32_t GetConstantBufferMemberCountImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  uint32_t GetConstantBufferMemberCount(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
   {
     uint32_t uDescSetCount = 0u;
     SpvReflectDescriptorSet* aDescSets[4];
@@ -1301,7 +1217,7 @@ namespace api
         {
           SpvReflectDescriptorBinding* pDesc = pDescSet->bindings[j];
 
-          if (pDesc->descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+          if (pDesc->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
           {
             if (uCurrIdx == _uIdx)
             {
@@ -1314,17 +1230,12 @@ namespace api
       }
     }
 
-    THROW_GENERIC_EXCEPTION("[API] Constant buffer not found by index");
+    ASSERT_MSG(false, "[Vulkan] Constant buffer not found by index");
 
     return 0u;
   }
 
-  uint32_t GetConstantBufferMemberCount(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
-  {
-    return CallOrFail("GetConstantBufferMemberCount", [&] { return GetConstantBufferMemberCountImpl(_pAPIRenderState, _eStage, _uIdx); });
-  }
-
-  static const char* GetConstantBufferMemberNameImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  const char* GetConstantBufferMemberName(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
     uint32_t uDescSetCount = 0u;
     SpvReflectDescriptorSet* aDescSets[4];
@@ -1343,7 +1254,7 @@ namespace api
         {
           SpvReflectDescriptorBinding* pDesc = pDescSet->bindings[j];
 
-          if (pDesc->descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+          if (pDesc->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
           {
             if (uCurrIdx == _uIdx)
             {
@@ -1360,17 +1271,12 @@ namespace api
       }
     }
 
-    THROW_GENERIC_EXCEPTION("[API] Constant buffer member not found by index");
+    ASSERT_MSG(false, "[Vulkan] Constant buffer member not found by index");
 
     return "";
   }
 
-  const char* GetConstantBufferMemberName(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
-  {
-    return CallOrFail("GetConstantBufferMemberName", [&] { return GetConstantBufferMemberNameImpl(_pAPIRenderState, _eStage, _uIdx, _uMemberIdx); });
-  }
-
-  static size_t GetConstantBufferMemberSizeImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  size_t GetConstantBufferMemberSize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
 
     uint32_t uDescSetCount = 0u;
@@ -1390,7 +1296,7 @@ namespace api
         {
           SpvReflectDescriptorBinding* pDesc = pDescSet->bindings[j];
 
-          if (pDesc->descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+          if (pDesc->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
           {
             if (uCurrIdx == _uIdx)
             {
@@ -1407,17 +1313,12 @@ namespace api
       }
     }
 
-    THROW_GENERIC_EXCEPTION("[API] Constant buffer member not found by index");
+    ASSERT_MSG(false, "[Vulkan] Constant buffer member not found by index");
 
     return 0u;
   }
 
-  size_t GetConstantBufferMemberSize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
-  {
-    return CallOrFail("GetConstantBufferMemberSize", [&] { return GetConstantBufferMemberSizeImpl(_pAPIRenderState, _eStage, _uIdx, _uMemberIdx); });
-  }
-
-  static ConstantBufferType GetConstantBufferMemberTypeImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  ConstantBufferType GetConstantBufferMemberType(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
 
     uint32_t uDescSetCount = 0u;
@@ -1437,7 +1338,7 @@ namespace api
         {
           SpvReflectDescriptorBinding* pDesc = pDescSet->bindings[j];
 
-          if (pDesc->descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+          if (pDesc->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
           {
             if (uCurrIdx == _uIdx)
             {
@@ -1488,18 +1389,13 @@ namespace api
       }
     }
 
-    THROW_GENERIC_EXCEPTION("[API] Constant buffer member type invalid ");
+    ASSERT_MSG(false, "[Vulkan] Constant buffer member type invalid");
 
 
     return ConstantBufferType::NONE;
   }
 
-  ConstantBufferType GetConstantBufferMemberType(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
-  {
-    return CallOrFail("GetConstantBufferMemberType", [&] { return GetConstantBufferMemberTypeImpl(_pAPIRenderState, _eStage, _uIdx, _uMemberIdx); });
-  }
-
-  static uint32_t GetConstantBufferMemberArraySizeImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  uint32_t GetConstantBufferMemberArraySize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
     uint32_t uDescSetCount = 0u;
     SpvReflectDescriptorSet* aDescSets[4];
@@ -1518,7 +1414,7 @@ namespace api
         {
           SpvReflectDescriptorBinding* pDesc = pDescSet->bindings[j];
 
-          if (pDesc->descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+          if (pDesc->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
           {
             if (uCurrIdx == _uIdx)
             {
@@ -1544,14 +1440,9 @@ namespace api
       }
     }
 
-    THROW_GENERIC_EXCEPTION("[API] Constant buffer member array size invalid ");
+    ASSERT_MSG(false, "[Vulkan] Constant buffer member array size invalid");
 
     return 0u;
-  }
-
-  uint32_t GetConstantBufferMemberArraySize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
-  {
-    return CallOrFail("GetConstantBufferMemberArraySize", [&] { return GetConstantBufferMemberArraySizeImpl(_pAPIRenderState, _eStage, _uIdx, _uMemberIdx); });
   }
 
   // Uniform block of the _uIdx-th uniform buffer, using the same ordering as the functions above
@@ -1587,24 +1478,19 @@ namespace api
     return nullptr;
   }
 
-  static size_t GetConstantBufferSizeImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
+  size_t GetConstantBufferSize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
   {
     if (const SpvReflectBlockVariable* pBlock = FindUniformBlock(_pAPIRenderState, _eStage, _uIdx))
     {
       return pBlock->padded_size;
     }
 
-    THROW_GENERIC_EXCEPTION("[API] Constant buffer not found by index");
+    ASSERT_MSG(false, "[Vulkan] Constant buffer not found by index");
 
     return 0u;
   }
 
-  size_t GetConstantBufferSize(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx)
-  {
-    return CallOrFail("GetConstantBufferSize", [&] { return GetConstantBufferSizeImpl(_pAPIRenderState, _eStage, _uIdx); });
-  }
-
-  static size_t GetConstantBufferMemberOffsetImpl(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
+  size_t GetConstantBufferMemberOffset(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
   {
     const SpvReflectBlockVariable* pBlock = FindUniformBlock(_pAPIRenderState, _eStage, _uIdx);
 
@@ -1613,19 +1499,14 @@ namespace api
       return pBlock->members[_uMemberIdx].offset;
     }
 
-    THROW_GENERIC_EXCEPTION("[API] Constant buffer member not found by index");
+    ASSERT_MSG(false, "[Vulkan] Constant buffer member not found by index");
 
     return 0u;
   }
 
-  size_t GetConstantBufferMemberOffset(const RenderState* _pAPIRenderState, PipelineStage _eStage, uint32_t _uIdx, uint32_t _uMemberIdx)
-  {
-    return CallOrFail("GetConstantBufferMemberOffset", [&] { return GetConstantBufferMemberOffsetImpl(_pAPIRenderState, _eStage, _uIdx, _uMemberIdx); });
-  }
-
   // Render substate
 
-  static ResourceSet* CreateResourceSetImpl(LinearAllocator* _pAllocator, RenderState* _pRenderState, uint32_t _uSetId)
+  ResourceSet* CreateResourceSet(LinearAllocator* _pAllocator, RenderState* _pRenderState, uint32_t _uSetId)
   {    
     ASSERT(_uSetId < MAX_DESCRIPTOR_SET_LAYOUTS);
 
@@ -1636,46 +1517,49 @@ namespace api
 
     uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
+    if (_uSetId >= MAX_DESCRIPTOR_SET_LAYOUTS || _pRenderState->m_aDescriptorSetLayouts[_uSetId] == VK_NULL_HANDLE)
+    {
+      LogError("[Vulkan] CreateResourceSet: the render state has no descriptor set layout for set %u", _uSetId);
+      return nullptr;
+    }
+
     pSubState->m_pDescSets = NewArray<VkDescriptorSet>(_pAllocator, uNumImages);
 
-    // The layouts are only needed for the allocation below: take them from the
-    // same allocator and give the memory back right after.
-    const size_t zTempMark = _pAllocator->PeekCurrent();
-    VkDescriptorSetLayout* aLayouts = NewArray<VkDescriptorSetLayout>(_pAllocator, uNumImages);
-
-    if(_pRenderState->m_aDescriptorSetLayouts[_uSetId] == VK_NULL_HANDLE)
+    bool bAllocated = false;
     {
-      THROW_GENERIC_EXCEPTION("[API] CreateAPIResourceSet: Render state does not have a descriptor set layout for the specified set id");
+      // The layouts are only needed for the allocation below: take them from the
+      // same allocator and give the memory back at the end of this scope.
+      ScopedRollback oTemp(_pAllocator);
+      VkDescriptorSetLayout* aLayouts = NewArray<VkDescriptorSetLayout>(_pAllocator, uNumImages);
+
+      for (uint32_t i = 0; i < uNumImages; i++)
+      {
+        aLayouts[i] = _pRenderState->m_aDescriptorSetLayouts[_uSetId];
+      }
+
+      VkDescriptorSetAllocateInfo oDescSetAllocInfo{};
+      oDescSetAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+      oDescSetAllocInfo.descriptorPool = s_oGlobalData.m_oWindow.m_hDescPool;
+      oDescSetAllocInfo.descriptorSetCount = uNumImages;
+      oDescSetAllocInfo.pSetLayouts = aLayouts;
+
+      bAllocated = VK_OK(vkAllocateDescriptorSets(s_oGlobalData.m_oWindow.m_hDevice, &oDescSetAllocInfo, pSubState->m_pDescSets));
     }
 
-    for (int i = 0; i < uNumImages; i++)
+    if (!bAllocated)
     {
-      aLayouts[i] = _pRenderState->m_aDescriptorSetLayouts[_uSetId];
+      // Nothing to release: the ResourceSet only holds the sets that failed to allocate
+      return nullptr;
     }
-
-    VkDescriptorSetAllocateInfo oDescSetAllocInfo{};
-    oDescSetAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    oDescSetAllocInfo.descriptorPool = s_oGlobalData.m_oWindow.m_hDescPool;
-    oDescSetAllocInfo.descriptorSetCount = uNumImages;
-    oDescSetAllocInfo.pSetLayouts = aLayouts;
-
-    VK_CHECK(vkAllocateDescriptorSets(s_oGlobalData.m_oWindow.m_hDevice, &oDescSetAllocInfo, pSubState->m_pDescSets))
-
-    _pAllocator->Rollback(zTempMark);    
 
     return pSubState;
-  }
-
-  ResourceSet* CreateResourceSet(LinearAllocator* _pAllocator, RenderState* _pRenderState, uint32_t _uSetId)
-  {
-    return CallOrFail("CreateResourceSet", [&] { return CreateResourceSetImpl(_pAllocator, _pRenderState, _uSetId); });
   }
 
   void BeginResourceSetSetup(ResourceSet* _pSubState)
   {
     /*if (s_oGlobalData.m_pUsingSubState != nullptr)
     {
-      THROW_GENERIC_EXCEPTION("[API] EndSubStateSetup was not called before a new BeginSubStateSetup call")
+      ASSERT_MSG(false, "[API] EndSubStateSetup was not called before a new BeginSubStateSetup call");
     }*/
     s_oGlobalData.m_oDescSetUpdater.SetDescriptorSets(_pSubState->m_pDescSets);    
   }
@@ -1704,15 +1588,11 @@ namespace api
     return true;
   }
 
-  static void EndResourceSetSetupImpl()
-  {        
-    s_oGlobalData.m_oDescSetUpdater.Update();
-    s_oGlobalData.m_oDescSetUpdater.Clear();
-  }
-
   bool EndResourceSetSetup()
   {
-    return CallOrFail("EndResourceSetSetup", [&] { EndResourceSetSetupImpl(); return true; });
+    s_oGlobalData.m_oDescSetUpdater.Update();
+    s_oGlobalData.m_oDescSetUpdater.Clear();
+    return true;
   }
 
   void BindResourceSet(RenderState* _pRenderState, ResourceSet* _pResourceSet)
@@ -1721,11 +1601,11 @@ namespace api
     vkCmdBindDescriptorSets(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], VK_PIPELINE_BIND_POINT_GRAPHICS, _pRenderState->m_hPipelineLayout, _pResourceSet->m_uSetId, 1, &_pResourceSet->m_pDescSets[uFrameIdx], 0, NULL);
   }
 
-  static void DestroyResourceSetImpl(ResourceSet* _pAPIResourceSet)
+  void DestroyResourceSet(ResourceSet* _pAPIResourceSet)
   {
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
 
-    VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, 1, &s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx], VK_TRUE, UINT64_MAX))
+    VK_CHECK_FATAL(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, 1, &s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx], VK_TRUE, UINT64_MAX));
 
     uint32_t uNumImages = s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
     vkFreeDescriptorSets(s_oGlobalData.m_oWindow.m_hDevice, s_oGlobalData.m_oWindow.m_hDescPool, uNumImages, _pAPIResourceSet->m_pDescSets);
@@ -1733,30 +1613,20 @@ namespace api
     _pAPIResourceSet->~ResourceSet();
   }
 
-  void DestroyResourceSet(ResourceSet* _pAPIResourceSet)
-  {
-    CallOrFatal("DestroyResourceSet", [&] { DestroyResourceSetImpl(_pAPIResourceSet); });
-  }
-
   // Drawing
 
-  static void WaitForLastImageImpl(const Window* _pWindow)
+  void WaitForLastImage()
   {
-    VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, 1u, &s_oGlobalData.m_oWindow.m_pInFlightFences[s_oGlobalData.m_oWindow.m_uCurrFrameIdx], VK_TRUE, UINT64_MAX))
+    VK_CHECK_FATAL(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, 1u, &s_oGlobalData.m_oWindow.m_pInFlightFences[s_oGlobalData.m_oWindow.m_uCurrFrameIdx], VK_TRUE, UINT64_MAX));
     s_oGlobalData.m_bRenderBegan = false;
   }
 
-  void WaitForLastImage(const Window* _pWindow)
-  {
-    CallOrFatal("WaitForLastImage", [&] { WaitForLastImageImpl(_pWindow); });
-  }
-
-  static int BeginDrawImpl()
+  int BeginDraw()
   {
 
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
 
-    VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, 1, &s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx], VK_TRUE, UINT64_MAX))
+    VK_CHECK_FATAL(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, 1, &s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx], VK_TRUE, UINT64_MAX));
 
     VkResult hResult = VK_SUCCESS; 
     
@@ -1769,34 +1639,26 @@ namespace api
     {
       s_oGlobalData.m_oWindow.m_bResized = false;     
       s_oGlobalData.m_bRenderBegan = false;
-      // The window can report a resize before the first frame, when no ImGui frame was ever begun
-      if (ImGui::GetFrameCount() > 0)
-      {
-        ImGui::EndFrame();
-      }
-      RecreateSwapchain();      
-      ImGui_ImplVulkan_Shutdown();
-      ImGui_ImplWin32_Shutdown();
-      SetupImGui();
+      // The ImGui pipeline needs no rebuild: the new render pass has the same formats
+      // and sample count, so it is compatible with the one the pipeline was created with
+      RecreateSwapchain();
       return 1;
     }
     else if (hResult != VK_SUCCESS)
     {
-      VK_CHECK(hResult)
+      VK_CHECK_FATAL(hResult);
     }
 
-    VK_CHECK(vkResetFences(s_oGlobalData.m_oWindow.m_hDevice, 1, &s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx]))
+    VK_CHECK_FATAL(vkResetFences(s_oGlobalData.m_oWindow.m_hDevice, 1, &s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx]));
 
-    VK_CHECK(vkResetCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], 0))
+    VK_CHECK_FATAL(vkResetCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], 0));
 
     VkCommandBufferBeginInfo oCommandBufferBeginInfo {};
     oCommandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     oCommandBufferBeginInfo.flags = 0u;
     oCommandBufferBeginInfo.pInheritanceInfo = NULL;
 
-    VK_CHECK(vkBeginCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], &oCommandBufferBeginInfo))  
-
-    api::ImGuiNewFrame();
+    VK_CHECK_FATAL(vkBeginCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], &oCommandBufferBeginInfo));
 
     s_oGlobalData.m_bRenderBegan = true;
 
@@ -1804,33 +1666,23 @@ namespace api
     return 0;
   }
 
-  int BeginDraw()
-  {
-    return CallOrFatal("BeginDraw", [&] { return BeginDrawImpl(); });
-  }
-
-  static void BeginDrawOfflineImpl()
+  void BeginDrawOffline()
   {
 
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
 
-    VK_CHECK(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, 1, &s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx], VK_TRUE, UINT64_MAX))
+    VK_CHECK_FATAL(vkWaitForFences(s_oGlobalData.m_oWindow.m_hDevice, 1, &s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx], VK_TRUE, UINT64_MAX));
 
-    VK_CHECK(vkResetFences(s_oGlobalData.m_oWindow.m_hDevice, 1, &s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx]))
+    VK_CHECK_FATAL(vkResetFences(s_oGlobalData.m_oWindow.m_hDevice, 1, &s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx]));
 
-    VK_CHECK(vkResetCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], 0))
+    VK_CHECK_FATAL(vkResetCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], 0));
 
     VkCommandBufferBeginInfo oCommandBufferBeginInfo {};
     oCommandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     oCommandBufferBeginInfo.flags = 0u;
     oCommandBufferBeginInfo.pInheritanceInfo = NULL;
 
-    VK_CHECK(vkBeginCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], &oCommandBufferBeginInfo))
-  }
-
-  void BeginDrawOffline()
-  {
-    CallOrFatal("BeginDrawOffline", [&] { BeginDrawOfflineImpl(); });
+    VK_CHECK_FATAL(vkBeginCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx], &oCommandBufferBeginInfo));
   }
   
   void DrawMesh(RenderState* _pRenderState, Mesh* _pMesh, uint32_t _uIndexCount, const void* _pConstantData, uint32_t _uConstantSize)
@@ -1850,12 +1702,12 @@ namespace api
 
   }
 
-  static void EndDrawImpl()
+  void EndDraw()
   {    
 
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;    
 
-    VK_CHECK(vkEndCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx]))
+    VK_CHECK_FATAL(vkEndCommandBuffer(s_oGlobalData.m_oWindow.m_pCmdBuffers[uFrameIdx]));
 
     VkSemaphore aWaitSemaphores[] = { s_oGlobalData.m_oWindow.m_pImageAvailableSemaphores[uFrameIdx] };
     VkPipelineStageFlags aWaitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
@@ -1871,15 +1723,10 @@ namespace api
     oSubmitInfo.signalSemaphoreCount = s_oGlobalData.m_bRenderBegan ? 1 : 0;
     oSubmitInfo.pSignalSemaphores = aSignalSemaphores;
 
-    VK_CHECK(vkQueueSubmit(s_oGlobalData.m_oWindow.m_hRenderQueue, 1, &oSubmitInfo, s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx]))   
+    VK_CHECK_FATAL(vkQueueSubmit(s_oGlobalData.m_oWindow.m_hRenderQueue, 1, &oSubmitInfo, s_oGlobalData.m_oWindow.m_pInFlightFences[uFrameIdx]));
   }
 
-  void EndDraw()
-  {
-    CallOrFatal("EndDraw", [&] { EndDrawImpl(); });
-  }
-
-  static void PresentImpl()
+  void Present()
   {
 
     const uint32_t uFrameIdx = s_oGlobalData.m_oWindow.m_uCurrFrameIdx;
@@ -1897,25 +1744,11 @@ namespace api
     oPresentInfo.pImageIndices = &s_oGlobalData.m_oWindow.m_uCurrSwapchainImageIdx;
     oPresentInfo.pResults = NULL;
 
-    VK_CHECK(vkQueuePresentKHR(s_oGlobalData.m_oWindow.m_hPresentQueue, &oPresentInfo))
+    VK_CHECK_FATAL(vkQueuePresentKHR(s_oGlobalData.m_oWindow.m_hPresentQueue, &oPresentInfo));
 
     //s_oGlobalData.m_oWindow.m_uCurrSwapchainImageIdx = (s_oGlobalData.m_oWindow.m_uCurrSwapchainImageIdx + 1u) % s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
 
     s_oGlobalData.m_oWindow.m_uCurrFrameIdx = (s_oGlobalData.m_oWindow.m_uCurrFrameIdx + 1u) % s_oGlobalData.m_oWindow.m_uSwapchainImageCount;
-  }
-
-  void Present()
-  {
-    CallOrFatal("Present", [&] { PresentImpl(); });
-  }
-
-  // Misc
-
-  void ImGuiNewFrame()
-  {
-    ImGui_ImplVulkan_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
   }
 
 }

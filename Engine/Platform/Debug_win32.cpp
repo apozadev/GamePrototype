@@ -1,5 +1,7 @@
 #include "Platform/Debug.h"
 
+#include <csignal>
+#include <cstdlib>
 #include <exception>
 
 #include "Asserts.h"
@@ -134,30 +136,25 @@ namespace platform
 
   //-----------------------------------------------------------------------------
 
-  [[noreturn]] static void OnTerminate()
+  // With _HAS_EXCEPTIONS=0 the STL reports its failures (e.g. bad_alloc, out of range)
+  // through this handler instead of throwing; it carries the error message.
+  static void __cdecl OnStandardLibraryError(const std::exception& _rError)
   {
-    // std::terminate is mostly reached through an uncaught exception: report what it was
-    if (std::exception_ptr pException = std::current_exception())
-    {
-      try
-      {
-        std::rethrow_exception(pException);
-      }
-      catch (const std::exception& e)
-      {
-        FATAL_ERROR_FORMAT("Uncaught exception: %s", e.what());
-      }
-      catch (...)
-      {
-        FATAL_ERROR("Uncaught exception of unknown type");
-      }
-    }
-
-    FATAL_ERROR("std::terminate called");
+    FATAL_ERROR_FORMAT("Standard library error: %s", _rError.what());
   }
 
-  void InstallFatalErrorHandlersForThread()
+  // abort(), std::terminate (e.g. destroying a joinable std::thread), failed CRT checks
+  static void __cdecl OnAbortSignal(int)
   {
-    std::set_terminate(OnTerminate);
+    FATAL_ERROR("abort() was called");
+  }
+
+  void InstallFatalErrorHandlers()
+  {
+    std::exception::_Set_raise_handler(OnStandardLibraryError);
+
+    // The fatal dialog replaces the CRT's own abort message box
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    signal(SIGABRT, OnAbortSignal);
   }
 }

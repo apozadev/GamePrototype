@@ -11,29 +11,25 @@ endif()
 set(GRAPHICS_BACKEND_DIR "${CMAKE_CURRENT_SOURCE_DIR}/GraphicsBackend") 
 
 set(ENGINE_SOURCES
-	"${GRAPHICS_BACKEND_DIR}/Exception.cpp"
-	"${GRAPHICS_BACKEND_DIR}/FileUtils.cpp"
-	"${GRAPHICS_BACKEND_DIR}/InFile.cpp"
+	"ObjLoader.cpp"
 )
 
 set(ENGINE_HEADERS
 	"${GRAPHICS_BACKEND_DIR}/API/GraphicsAPI.h"
+	"${GRAPHICS_BACKEND_DIR}/API/ImGuiRenderer.h"
 	"${GRAPHICS_BACKEND_DIR}/APIAllocation.h"
-	"${GRAPHICS_BACKEND_DIR}/APIBoundary.h"
 	"${GRAPHICS_BACKEND_DIR}/BlendEnums.h"
 	"${GRAPHICS_BACKEND_DIR}/ConstantBufferTypes.h"
 	"${GRAPHICS_BACKEND_DIR}/CullMode.h"
 	"${GRAPHICS_BACKEND_DIR}/DepthCompareOp.h"
-	"${GRAPHICS_BACKEND_DIR}/Exception.h"
-	"${GRAPHICS_BACKEND_DIR}/FileUtils.h"
 	"${GRAPHICS_BACKEND_DIR}/ImageFormat.h"
-	"${GRAPHICS_BACKEND_DIR}/InFile.h"
 	"${GRAPHICS_BACKEND_DIR}/LayoutConfig.h"
 	"${GRAPHICS_BACKEND_DIR}/MeshConstant.h"
 	"${GRAPHICS_BACKEND_DIR}/PipelineStage.h"
 	"${GRAPHICS_BACKEND_DIR}/RenderStateInfo.h"
 	"${GRAPHICS_BACKEND_DIR}/ResourceBindInfo.h"
 	"${GRAPHICS_BACKEND_DIR}/SamplerConfig.h"
+	"${GRAPHICS_BACKEND_DIR}/ShaderCode.h"
 	"${GRAPHICS_BACKEND_DIR}/TextureSubResource.h"
 	"${GRAPHICS_BACKEND_DIR}/TextureUsage.h"
 	"${GRAPHICS_BACKEND_DIR}/Vertex.h"
@@ -43,9 +39,12 @@ set(ENGINE_HEADERS
 	"Log.cpp" 
 	"Mailbox.h" 
 	"Mailbox.cpp" 
-	"Hash.h" 
+	"Hash.h"
+	"ImGuiDrawDataCopy.h"
+	"ImGuiDrawDataCopy.cpp"
 	"Material.h"
 	"Material.cpp" 
+	"ObjLoader.h"
 	"ResourceLoader.h"
 	"Vertex.h" 
 	"Renderer.h" 
@@ -59,11 +58,12 @@ set(ENGINE_HEADERS
 	"Memory/ThreadArenas.h"
 	"Memory/ThreadArenas.cpp"
 	"Platform/Debug.h"
+	"Platform/File.h"
 	"Platform/Memory.h")
 
 # Platform layer: one implementation per OS
 if(WIN32)
-	list(APPEND ENGINE_SOURCES "Platform/Memory_win32.cpp" "Platform/Debug_win32.cpp")
+	list(APPEND ENGINE_SOURCES "Platform/Memory_win32.cpp" "Platform/Debug_win32.cpp" "Platform/File_win32.cpp")
 else()
 	message(FATAL_ERROR "No platform layer for this OS yet (see Engine/Platform)")
 endif()
@@ -75,7 +75,8 @@ if(BUILD_DX11)
 		"${GRAPHICS_BACKEND_DIR}/3rd/dxerr/dxerr.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/APIInternal.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11API.cpp"
-		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Exception.cpp"
+		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Errors.cpp"
+		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11ImGui.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/RenderTargetBuilder.cpp"
 	)
 	list(APPEND ENGINE_HEADERS
@@ -83,7 +84,6 @@ if(BUILD_DX11)
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/ConstantBuffer.h"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11BindSlotOffset.h"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Data.h"
-		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Exception.h"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/DX11Macros.h"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/Mesh.h"
 		"${GRAPHICS_BACKEND_DIR}/API/DX11/RenderState.h"
@@ -102,7 +102,8 @@ message(STATUS "Building with Vulkan backend")
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/DescriptorUtils.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/RenderTargetBuilder.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanAPI.cpp"
-		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanException.cpp"
+		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanErrors.cpp"
+		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanImGui.cpp"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanShaderReflection.cpp"
 	)
 	list(APPEND ENGINE_HEADERS
@@ -117,7 +118,6 @@ message(STATUS "Building with Vulkan backend")
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/ResourceSet.h"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/Texture.h"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanData.h"
-		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanException.h"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanMacros.h"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/VulkanShaderReflection.h"
 		"${GRAPHICS_BACKEND_DIR}/API/Vulkan/Window.h"

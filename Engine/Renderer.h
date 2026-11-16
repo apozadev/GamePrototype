@@ -57,15 +57,23 @@ void SetRenderObjectMaterial(MailboxHandle _hMailbox, RenderObjectHandle _hRende
 // Ignored if the material is not READY or no shader declares the name. Max 64 bytes (float4x4).
 void SetMaterialProperty(MailboxHandle _hMailbox, ResourceHandle _hMaterial, const char* _sName, const void* _pData, uint32_t _uSize);
 
+struct ImDrawData;
+
+// Update thread, between AcquireMailboxWrite/ReleaseMailboxWrite, after ImGui::Render().
+// Copies the draw data (the next ImGui::NewFrame overwrites the original); the render
+// thread draws the copy over that frame's scene. Call at most once per mailbox.
+// If the copy doesn't fit, it logs and that frame has no ImGui.
+void SubmitImGuiDrawData(MailboxHandle _hMailbox, const ImDrawData* _pDrawData);
+
 // Safe to call from the window thread; the render thread applies it next frame.
 void RequestWindowResize();
 
 // Loader thread only (the create request ring has a single producer).
 // Copy the request and its data into the create request ring, blocking while it is full.
-// A request too big to ever fit in the ring is a fatal error (increase CREATE_REQUEST_RING_SIZE).
-void RequestCreateMesh(const MeshCreateRequest& _oRequest);
+// Returns false (logged) if the request is too big to ever fit in the ring (increase CREATE_REQUEST_RING_SIZE).
+bool RequestCreateMesh(const MeshCreateRequest& _oRequest);
 
-void RequestCreateMaterial(const MaterialCreateRequest& _oRequest);
+bool RequestCreateMaterial(const MaterialCreateRequest& _oRequest);
 
 MailboxHandle AcquireMailboxWrite();
 

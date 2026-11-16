@@ -21,11 +21,13 @@ struct LinearAllocator;
 // that is reclaimed when the allocator is reset or rolled back, which must only
 // happen after the objects in it have been destroyed.
 //
-// Errors: no exception ever leaves these functions.
-//  - Creation and setup (Initialize, CreateAPIWindow, Create*, EndRenderTargetSetup,
-//    ResourceSetAdd*, EndResourceSetSetup, reflection getters) log and return a zero
-//    value (nullptr, false, 0) on failure: the caller fails that resource and moves on.
-//  - Everything else (drawing, presenting, destroying) treats failure as fatal.
+// Errors (no exceptions anywhere):
+//  - Resource creation and setup (Create*, EndRenderTargetSetup, ResourceSetAdd*,
+//    EndResourceSetSetup, reflection getters) log and return a zero value (nullptr,
+//    false, 0) on failure: the caller fails that resource and moves on.
+//  - Initialize and CreateAPIWindow: the game can't run without them, so a failure is
+//    a fatal error at the call that failed.
+//  - Everything else (drawing, presenting, resizing, destroying) treats failure as fatal.
 
 namespace api 
 { 
@@ -40,7 +42,7 @@ namespace api
 
 	// General
 
-	bool Initialize();
+	void Initialize();
 
 	void ShutDown();
 
@@ -49,7 +51,7 @@ namespace api
 	// Window
 
 	// Window-lifetime objects (e.g. the dummy texture) live in _pAllocator, which must outlive DestroyWindow
-	bool CreateAPIWindow(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples);
+	void CreateAPIWindow(LinearAllocator* _pAllocator, HWND _hwnd, uint32_t _uMsaaSamples);
 
 	bool IsWindowCreated();
 
@@ -182,8 +184,6 @@ namespace api
 
 	void Present();
 
-	// Misc
-
-	void ImGuiNewFrame();
+	// ImGui drawing lives in API/ImGuiRenderer.h
 
 }

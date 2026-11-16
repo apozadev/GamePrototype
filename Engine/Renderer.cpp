@@ -6,9 +6,13 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "imgui.h"
+
 #include "API/GraphicsAPI.h"
+#include "API/ImGuiRenderer.h"
 #include "Asserts.h"
 #include "Hash.h"
+#include "ImGuiDrawDataCopy.h"
 #include "Log.h"
 #include "Material.h"
 #include "Mailbox.h"
@@ -16,7 +20,6 @@
 #include "Memory/MemoryUtil.h"
 #include "Memory/RingAllocator.h"
 #include "Memory/ThreadArenas.h"
-#include "Platform/Debug.h"
 
 struct MeshConstants
 {
@@ -144,6 +147,15 @@ static Mailbox g_oMailbox1 = { g_aMailboxMemory1, 0, MAILBOX_CAPACITY, MAILBOX_I
 static MailboxHandle g_hNextWriteMailbox = 0; // Update thread only
 static MailboxHandle g_hNextReadMailbox = 0;  // Render thread only
 
+// ImGui draw data travels next to each mailbox, in its own arena: it is too big for the
+// message buffer. Owned like the mailbox itself: by the update thread while RECORDING
+// (reset, then filled by SubmitImGuiDrawData), by the render thread while PROCESSING.
+// The mailbox only goes back to IDLE once its frame is drawn.
+static constexpr size_t IMGUI_DRAW_DATA_ARENA_SIZE = 2u * 1024u * 1024u;
+
+static LinearAllocator* g_aImGuiArenas[2] = {};
+static ImDrawData* g_aImGuiDrawData[2] = {};
+
 Mailbox& GetMailbox(MailboxHandle _hMailbox)
 {
   ASSERT_MSG_FORMAT(_hMailbox == 0 || _hMailbox == 1, "Invalid mailbox handle %u", _hMailbox);
@@ -209,6 +221,24 @@ void SetMaterialProperty(MailboxHandle _hMailbox, ResourceHandle _hMaterial, con
   AddMessageToMailbox(_hMailbox, &oMsg);
 }
 
+void SubmitImGuiDrawData(MailboxHandle _hMailbox, const ImDrawData* _pDrawData)
+{
+  ASSERT_MSG(g_aImGuiDrawData[_hMailbox] == nullptr, "SubmitImGuiDrawData called twice for the same mailbox");
+
+  LinearAllocator* pArena = g_aImGuiArenas[_hMailbox];
+  ImDrawData* pCopy = CopyImDrawData(pArena, _pDrawData);
+  if (!pCopy)
+  {
+    // Losing the debug UI for a frame beats stopping the game, but it shouldn't go unnoticed
+    LogError("ImGui draw data (%d vertices, %d indices) doesn't fit in %zu bytes: frame drawn without ImGui. Increase IMGUI_DRAW_DATA_ARENA_SIZE",
+      _pDrawData->TotalVtxCount, _pDrawData->TotalIdxCount, IMGUI_DRAW_DATA_ARENA_SIZE);
+    pArena->Reset();
+    return;
+  }
+
+  g_aImGuiDrawData[_hMailbox] = pCopy;
+}
+
 void RequestWindowResize()
 {
   g_bResizePending = true;
@@ -224,20 +254,30 @@ void InitRenderer(LinearAllocator* _pAllocator)
   FATAL_ASSERT_MSG_FORMAT(pRingMemory, "Not enough memory for the create request ring (%zu bytes)", CREATE_REQUEST_RING_SIZE);
   RingAllocator* pRing = NewObject<RingAllocator>(_pAllocator, pRingMemory, CREATE_REQUEST_RING_SIZE);
 
+  for (LinearAllocator*& rpArena : g_aImGuiArenas)
+  {
+    char* pArenaMemory = static_cast<char*>(_pAllocator->Allocate(IMGUI_DRAW_DATA_ARENA_SIZE, alignof(std::max_align_t)));
+    FATAL_ASSERT_MSG_FORMAT(pArenaMemory, "Not enough memory for the ImGui draw data arenas (%zu bytes each)", IMGUI_DRAW_DATA_ARENA_SIZE);
+    rpArena = NewObject<LinearAllocator>(_pAllocator, pArenaMemory, IMGUI_DRAW_DATA_ARENA_SIZE);
+  }
+
   std::lock_guard<std::mutex> lock(g_oRenderMutex);
   g_pCreateRequestRing = pRing;
 }
 
 // Reserves room for one request, waiting for the render thread to free some if needed.
-// Pair with PublishCreateRequest.
+// Returns nullptr (logged) if it can never fit. Pair with PublishCreateRequest.
 static char* AllocateCreateRequest(size_t _zSize)
 {
   std::unique_lock<std::mutex> lock(g_oRenderMutex);
 
   FATAL_ASSERT_MSG(g_pCreateRequestRing, "InitRenderer was not called");
-  FATAL_ASSERT_MSG_FORMAT(g_pCreateRequestRing->Fits(_zSize, CREATE_REQUEST_ALIGNMENT),
-    "Create request of %zu bytes can never fit in the create request ring (%zu bytes): increase CREATE_REQUEST_RING_SIZE",
-    _zSize, CREATE_REQUEST_RING_SIZE);
+  if (!g_pCreateRequestRing->Fits(_zSize, CREATE_REQUEST_ALIGNMENT))
+  {
+    LogError("Create request of %zu bytes can never fit in the create request ring (%zu bytes): increase CREATE_REQUEST_RING_SIZE",
+      _zSize, CREATE_REQUEST_RING_SIZE);
+    return nullptr;
+  }
 
   void* pMemory = nullptr;
   while ((pMemory = g_pCreateRequestRing->Allocate(_zSize, CREATE_REQUEST_ALIGNMENT)) == nullptr)
@@ -257,7 +297,7 @@ static void PublishCreateRequest()
   g_oRenderCV.notify_all();
 }
 
-void RequestCreateMesh(const MeshCreateRequest& _oRequest)
+bool RequestCreateMesh(const MeshCreateRequest& _oRequest)
 {
   PackedLayout oLayout;
   oLayout.Add(sizeof(MeshCreateRequest), alignof(MeshCreateRequest));
@@ -265,6 +305,10 @@ void RequestCreateMesh(const MeshCreateRequest& _oRequest)
   const size_t zIndexOffset = oLayout.Add(_oRequest.zIndexDataSize, CREATE_REQUEST_ALIGNMENT);
 
   char* pMemory = AllocateCreateRequest(oLayout.zSize);
+  if (!pMemory)
+  {
+    return false;
+  }
 
   if (_oRequest.zVertexDataSize > 0u)
   {
@@ -280,6 +324,7 @@ void RequestCreateMesh(const MeshCreateRequest& _oRequest)
   pRequest->pIndexData = pMemory + zIndexOffset;
 
   PublishCreateRequest();
+  return true;
 }
 
 // Copies _sString null-terminated to _pDest (sized with _sString.size() + 1) and points the view at the copy
@@ -299,7 +344,7 @@ static size_t GetStringViewStorageSize(std::string_view _sString)
   return _sString.empty() ? 0u : _sString.size() + 1u;
 }
 
-void RequestCreateMaterial(const MaterialCreateRequest& _oRequest)
+bool RequestCreateMaterial(const MaterialCreateRequest& _oRequest)
 {
   const RenderStateInfo& rInfo = _oRequest.oRenderStateInfo;
 
@@ -310,6 +355,10 @@ void RequestCreateMaterial(const MaterialCreateRequest& _oRequest)
   const size_t zGSOffset = oLayout.Add(GetStringViewStorageSize(rInfo.m_sGSFilename), 1u);
 
   char* pMemory = AllocateCreateRequest(oLayout.zSize);
+  if (!pMemory)
+  {
+    return false;
+  }
 
   MaterialCreateRequest* pRequest = new (pMemory) MaterialCreateRequest(_oRequest);
   RenderStateInfo& rCopiedInfo = pRequest->oRenderStateInfo;
@@ -318,6 +367,7 @@ void RequestCreateMaterial(const MaterialCreateRequest& _oRequest)
   rCopiedInfo.m_sGSFilename = CopyStringView(pMemory + zGSOffset, rInfo.m_sGSFilename);
 
   PublishCreateRequest();
+  return true;
 }
 
 static bool ProcessCreateMesh(LinearAllocator* _pAllocator, const MeshCreateRequest* _pRequest)
@@ -329,21 +379,22 @@ static bool ProcessCreateMesh(LinearAllocator* _pAllocator, const MeshCreateRequ
     return false;
   }
 
-  // On failure the API releases what it created; hand its memory back too
-  const size_t zMark = _pAllocator->PeekCurrent();
+  // On failure the API releases what it created; oRollback hands its memory back too
+  ScopedRollback oRollback(_pAllocator);
 
   Mesh oMesh = {};
   oMesh.pApiMesh = api::CreateMesh(_pAllocator, _pRequest->pVertexData, _pRequest->zVertexDataSize,
     _pRequest->pIndexData, _pRequest->zIndexDataSize, sizeof(MeshConstants));
   if (!oMesh.pApiMesh)
   {
-    _pAllocator->Rollback(zMark);
     return false;
   }
 
   oMesh.uIndexCount = static_cast<uint32_t>(_pRequest->zIndexDataSize / sizeof(uint16_t));
 
   g_dctMeshes[_pRequest->hHandle] = oMesh;
+
+  oRollback.Commit();
   return true;
 }
 
@@ -413,6 +464,10 @@ MailboxHandle AcquireMailboxWrite()
     oMailbox.zOffset = 0;
     oMailbox.eState = MAILBOX_RECORDING;
   }
+
+  // IDLE means the render thread has drawn this mailbox's frame: its ImGui copy is free
+  g_aImGuiArenas[hHandle]->Reset();
+  g_aImGuiDrawData[hHandle] = nullptr;
 
   g_hNextWriteMailbox = 1 - hHandle;
   return hHandle;
@@ -504,7 +559,8 @@ void ProcessMailbox(Mailbox* _pMailbox)
   }
 }
 
-void Render()
+// _hMailbox is the frame being drawn (in PROCESSING): its ImGui draw data, if any, goes on top
+void Render(MailboxHandle _hMailbox)
 {
   if (g_bResizePending.exchange(false))
   {
@@ -546,6 +602,11 @@ void Render()
           &constants,
           sizeof(constants));
       }
+    }
+
+    if (ImDrawData* pImGuiDrawData = g_aImGuiDrawData[_hMailbox])
+    {
+      api::ImGuiRendererDraw(pImGuiDrawData);
     }
 
     api::UnbindDefaultRenderTarget();
@@ -596,8 +657,6 @@ static void DestroyRenderResources(ThreadArenas* _pArenas)
 
 void RenderThreadFnc()
 {
-  platform::InstallFatalErrorHandlersForThread();
-
   ThreadArenas* pArenas = CreateThreadArenas(RENDER_THREAD_ARENAS_CONFIG);
 
   while (true)
@@ -648,10 +707,11 @@ void RenderThreadFnc()
     {
       ProcessMailbox(&GetMailbox(hReadMailbox));
 
-      // All messages are applied to render-thread state, the mailbox can be reused
-      ReleaseMailboxRead(hReadMailbox);
+      Render(hReadMailbox);
 
-      Render();
+      // Messages are applied and the frame's ImGui copy is drawn, the mailbox can be reused.
+      // Released after Render, not before: the update thread resets the ImGui copy on acquire.
+      ReleaseMailboxRead(hReadMailbox);
 
       pArenas->oFrame.Reset();
     }

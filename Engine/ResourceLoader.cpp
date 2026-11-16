@@ -9,12 +9,14 @@
 
 #include "Asserts.h"
 #include "Log.h"
+#include "ObjLoader.h"
 #include "Renderer.h"
+#include "GraphicsBackend/Vertex.h"
 #include "Memory/LinearAllocator.h"
 #include "Memory/MemoryUtil.h"
 #include "Memory/RingAllocator.h"
 #include "Memory/ThreadArenas.h"
-#include "Platform/Debug.h"
+#include "Platform/File.h"
 
 //-----------------------------------------------------------------------------
 // Load requests (update thread -> loader thread)
@@ -64,7 +66,7 @@ static std::mutex oResourceRegistryMutex;
 
 static std::unordered_map<ResourceHandle, ResourceEntry> dctResourceRegistry;
 
-static void ProcessLoadRequest(const ResourceLoadRequestBase* _pRequest);
+static void ProcessLoadRequest(LinearAllocator* _pScratch, const ResourceLoadRequestBase* _pRequest);
 
 //-----------------------------------------------------------------------------
 
@@ -156,36 +158,6 @@ static ResourceHandle PublishLoadRequest(ResourceLoadRequestBase* _pRequest, Res
 
 //-----------------------------------------------------------------------------
 
-ResourceHandle LoadResourceAsync(const MeshLoadRequestInfo& _oInfo)
-{
-  using Request_t = ResourceLoadRequest<MeshLoadRequestInfo>;
-
-  PackedLayout oLayout;
-  oLayout.Add(sizeof(Request_t), alignof(Request_t));
-  const size_t zVertexOffset = oLayout.Add(_oInfo.zVertexDataSize, REQUEST_ALIGNMENT);
-  const size_t zIndexOffset = oLayout.Add(_oInfo.zIndexDataSize, REQUEST_ALIGNMENT);
-
-  char* pMemory = AllocateLoadRequest(oLayout.zSize);
-
-  if (_oInfo.zVertexDataSize > 0u)
-  {
-    memcpy(pMemory + zVertexOffset, _oInfo.pVertexData, _oInfo.zVertexDataSize);
-  }
-  if (_oInfo.zIndexDataSize > 0u)
-  {
-    memcpy(pMemory + zIndexOffset, _oInfo.pIndexData, _oInfo.zIndexDataSize);
-  }
-
-  Request_t* pRequest = new (pMemory) Request_t();
-  pRequest->oRequestInfo = _oInfo;
-  pRequest->oRequestInfo.pVertexData = pMemory + zVertexOffset;
-  pRequest->oRequestInfo.pIndexData = pMemory + zIndexOffset;
-
-  return PublishLoadRequest(pRequest, ResourceType::MESH);
-}
-
-//-----------------------------------------------------------------------------
-
 static size_t GetStringStorageSize(const char* _sString)
 {
   return _sString ? strlen(_sString) + 1u : 0u;
@@ -200,6 +172,23 @@ static const char* CopyString(char* _pDest, const char* _sString)
   }
   memcpy(_pDest, _sString, strlen(_sString) + 1u);
   return _pDest;
+}
+
+ResourceHandle LoadResourceAsync(const MeshLoadRequestInfo& _oInfo)
+{
+  using Request_t = ResourceLoadRequest<MeshLoadRequestInfo>;
+
+  PackedLayout oLayout;
+  oLayout.Add(sizeof(Request_t), alignof(Request_t));
+  const size_t zFilenameOffset = oLayout.Add(GetStringStorageSize(_oInfo.pFilename), 1u);
+
+  char* pMemory = AllocateLoadRequest(oLayout.zSize);
+
+  Request_t* pRequest = new (pMemory) Request_t();
+  pRequest->oRequestInfo = _oInfo;
+  pRequest->oRequestInfo.pFilename = CopyString(pMemory + zFilenameOffset, _oInfo.pFilename);
+
+  return PublishLoadRequest(pRequest, ResourceType::MESH);
 }
 
 ResourceHandle LoadResourceAsync(const MaterialLoadRequestInfo& _oInfo)
@@ -251,8 +240,6 @@ void RequestLoaderThreadExit()
 
 void WorkerThreadProcessLoadRequests()
 {
-  platform::InstallFatalErrorHandlersForThread();
-
   ThreadArenas* pArenas = CreateThreadArenas(LOADER_THREAD_ARENAS_CONFIG);
 
   while (true)
@@ -273,7 +260,7 @@ void WorkerThreadProcessLoadRequests()
       }
     }
 
-    ProcessLoadRequest(pRequest);
+    ProcessLoadRequest(&pArenas->oFrame, pRequest);
 
     // Whatever happened, the request (and its copied data) is done with
     {
@@ -290,55 +277,78 @@ void WorkerThreadProcessLoadRequests()
 
 //-----------------------------------------------------------------------------
 
-static void ProcessLoadRequest(const ResourceLoadRequestBase* _pRequest)
+// File contents and the built geometry live in _pScratch until they're copied into the create request
+static bool LoadMesh(LinearAllocator* _pScratch, ResourceHandle _hHandle, const MeshLoadRequestInfo& _oInfo)
 {
-  ResourceType eType = _pRequest->eType;
-  switch (eType)
+  if (!_oInfo.pFilename)
+  {
+    LogError("Resource %u: mesh without a filename", _hHandle);
+    return false;
+  }
+
+  size_t zFileSize = 0u;
+  const char* pText = static_cast<const char*>(platform::ReadFile(_oInfo.pFilename, _pScratch, zFileSize));
+  if (!pText)
+  {
+    return false;
+  }
+
+  ObjMesh oMesh;
+  if (!ParseObj(pText, zFileSize, _pScratch, oMesh))
+  {
+    LogError("Resource %u: failed to load %s", _hHandle, _oInfo.pFilename);
+    return false;
+  }
+
+  // The render thread will call ResourceCompletedCallback once the GPU mesh is created
+  MeshCreateRequest oCreateRequest = {};
+  oCreateRequest.hHandle = _hHandle;
+  oCreateRequest.eType = ResourceType::MESH;
+  oCreateRequest.pVertexData = oMesh.pVertices;
+  oCreateRequest.zVertexDataSize = oMesh.uVertexCount * sizeof(Vertex);
+  oCreateRequest.pIndexData = oMesh.pIndices;
+  oCreateRequest.zIndexDataSize = oMesh.uIndexCount * sizeof(uint16_t);
+  return RequestCreateMesh(oCreateRequest);
+}
+
+static bool LoadMaterial(ResourceHandle _hHandle, const MaterialLoadRequestInfo& _oInfo)
+{
+  // The render thread will call ResourceCompletedCallback once the pipeline, descriptors, etc. are created
+  MaterialCreateRequest oCreateRequest = {};
+  oCreateRequest.hHandle = _hHandle;
+  oCreateRequest.eType = ResourceType::MATERIAL;
+
+  RenderStateInfo& rRSInfo = oCreateRequest.oRenderStateInfo;
+  rRSInfo.m_sVSFilename = _oInfo.pVSFilename ? _oInfo.pVSFilename : "";
+  rRSInfo.m_sPSFilename = _oInfo.pPSFilename ? _oInfo.pPSFilename : "";
+  rRSInfo.m_bBlendEnabled = _oInfo.bBlendEnabled;
+  rRSInfo.m_bDepthWrite = false;
+  rRSInfo.m_bDepthRead = false;
+  rRSInfo.m_eCullMode = CullMode::NONE;
+  rRSInfo.m_eDepthCompareOp = DepthCompareOp::ALWAYS;
+
+  return RequestCreateMaterial(oCreateRequest);
+}
+
+static void ProcessLoadRequest(LinearAllocator* _pScratch, const ResourceLoadRequestBase* _pRequest)
+{
+  bool bSucceeded = false;
+
+  switch (_pRequest->eType)
   {
   case ResourceType::MESH:
-  {
-    auto* pRequest = static_cast<const ResourceLoadRequest<MeshLoadRequestInfo>*>(_pRequest);
-    const MeshLoadRequestInfo& oInfo = pRequest->oRequestInfo;
-
-    // TODO: Load from disk. For now the caller hands us the data directly.
-
-    // Request GPU upload for the mesh data. The render thread will call ResourceCompletedCallback when the GPU upload is complete.
-    // The create request copies the data, so this request can be freed right after.
-    MeshCreateRequest oCreateRequest = {};
-    oCreateRequest.hHandle = pRequest->hHandle;
-    oCreateRequest.eType = ResourceType::MESH;
-    oCreateRequest.pVertexData = oInfo.pVertexData;
-    oCreateRequest.zVertexDataSize = oInfo.zVertexDataSize;
-    oCreateRequest.pIndexData = oInfo.pIndexData;
-    oCreateRequest.zIndexDataSize = oInfo.zIndexDataSize;
-    RequestCreateMesh(oCreateRequest);
+    bSucceeded = LoadMesh(_pScratch, _pRequest->hHandle, static_cast<const ResourceLoadRequest<MeshLoadRequestInfo>*>(_pRequest)->oRequestInfo);
     break;
-  }
   case ResourceType::MATERIAL:
-  {
-    auto* pRequest = static_cast<const ResourceLoadRequest<MaterialLoadRequestInfo>*>(_pRequest);
-    const MaterialLoadRequestInfo& oInfo = pRequest->oRequestInfo;
-
-    // Same here, request GPU to create pipeline, descriptors, etc. The render thread will call ResourceCompletedCallback when the GPU upload is complete.
-    MaterialCreateRequest oCreateRequest = {};
-    oCreateRequest.hHandle = pRequest->hHandle;
-    oCreateRequest.eType = ResourceType::MATERIAL;
-
-    RenderStateInfo& rRSInfo = oCreateRequest.oRenderStateInfo;
-    rRSInfo.m_sVSFilename = oInfo.pVSFilename ? oInfo.pVSFilename : "";
-    rRSInfo.m_sPSFilename = oInfo.pPSFilename ? oInfo.pPSFilename : "";
-    rRSInfo.m_bBlendEnabled = oInfo.bBlendEnabled;
-    rRSInfo.m_bDepthWrite = false;
-    rRSInfo.m_bDepthRead = false;
-    rRSInfo.m_eCullMode = CullMode::NONE;
-    rRSInfo.m_eDepthCompareOp = DepthCompareOp::ALWAYS;
-
-    RequestCreateMaterial(oCreateRequest);
+    bSucceeded = LoadMaterial(_pRequest->hHandle, static_cast<const ResourceLoadRequest<MaterialLoadRequestInfo>*>(_pRequest)->oRequestInfo);
+    break;
+  default:
+    ASSERT_MSG_FORMAT(false, "Resource %u: unhandled load request type %d", _pRequest->hHandle, static_cast<int>(_pRequest->eType));
     break;
   }
-  default:
-    ASSERT_MSG_FORMAT(false, "Resource %u: unhandled load request type %d", _pRequest->hHandle, static_cast<int>(eType));
+
+  if (!bSucceeded)
+  {
     ResourceFailedCallback(_pRequest->hHandle);
-    break;
   }
 }

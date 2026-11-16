@@ -24,7 +24,8 @@ namespace api
 
     void AddLayoutBinding(const char* _sName, VkDescriptorSetLayoutBinding&& _oBinding);
 
-    VkDescriptorSetLayout Build(VkDevice _hDevice);    
+    // VK_NULL_HANDLE on failure (logged)
+    VkDescriptorSetLayout Build(VkDevice _hDevice);
 
     bool Contains(VkDescriptorSetLayoutBinding _oBinding) const;
 

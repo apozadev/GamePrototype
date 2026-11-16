@@ -2,72 +2,88 @@
 #include "API/Vulkan/RenderTarget.h"
 #include "API/Vulkan/APIInternal.h"
 #include "API/Vulkan/Texture.h"
-#include "Exception.h"
+#include "Log.h"
 #include "API/Vulkan/VulkanMacros.h"
 #include "API/Vulkan/Window.h"
 
 namespace api
 {
 
-  void RenderTargetBuilder::Build()
+  bool RenderTargetBuilder::Build()
   {
 
     bool bMultiview = false;// (m_lstColorTextures.size() > 0u) && (m_lstColorTextures[0]->m_uLayers > 1u);
 
     bool bHasDepthStencil = m_pDepthStencilTexture != nullptr;
-    CreateRenderPass(m_lstColorTextures.size(), m_eColorFormat, bHasDepthStencil, m_eDepthStencilFormat, m_uMsaaSamples, m_pRenderTarget->m_hRenderPass, true, bMultiview);
+    const uint32_t uColorTextureCount = static_cast<uint32_t>(m_lstColorTextures.size());
+    const uint32_t uResolveTextureCount = static_cast<uint32_t>(m_lstColorResolveTextures.size());
 
-    uint32_t uAttachmentCount = m_lstColorTextures.size() + m_lstColorResolveTextures.size() + (m_pDepthStencilTexture ? 1u : 0u);
-
-    if (m_lstColorTextures.size() > MAX_RENDER_TARGET_COLOR_ATTACHMENTS || uAttachmentCount > MAX_RENDER_TARGET_ATTACHMENTS)
+    if (!CreateRenderPass(uColorTextureCount, m_eColorFormat, bHasDepthStencil, m_eDepthStencilFormat, m_uMsaaSamples, m_pRenderTarget->m_hRenderPass, true, bMultiview))
     {
-      THROW_GENERIC_EXCEPTION("[API] Too many render target attachments")
+      return false;
+    }
+
+    uint32_t uAttachmentCount = uColorTextureCount + uResolveTextureCount + (m_pDepthStencilTexture ? 1u : 0u);
+
+    if (uColorTextureCount > MAX_RENDER_TARGET_COLOR_ATTACHMENTS || uAttachmentCount > MAX_RENDER_TARGET_ATTACHMENTS)
+    {
+      LogError("[Vulkan] Too many render target attachments: %u", uAttachmentCount);
+      return false;
     }
 
     uint32_t uAttachmentIdx = 0u;
 
-    for (uint32_t i = 0; i < m_lstColorTextures.size(); i++)
+    for (uint32_t i = 0; i < uColorTextureCount; i++)
     {
       Texture* pTexture = m_lstColorTextures[i];
 
-      CreateImageView(
+      if (!CreateImageView(
         pTexture->m_hImage,
         pTexture->m_eFormat,
         m_lstColorMipLevels[i], 1u,
         0u, pTexture->m_uLayers,
         pTexture->m_uLayers > 1u ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
         VK_IMAGE_ASPECT_COLOR_BIT,
-        m_pRenderTarget->m_aImageViews[uAttachmentIdx++]);
+        m_pRenderTarget->m_aImageViews[uAttachmentIdx++]))
+      {
+        return false;
+      }
 
       m_pRenderTarget->m_aColorTextures[i] = pTexture;
       m_pRenderTarget->m_aColorTexturesMipLevels[i] = m_lstColorMipLevels[i];
     }
 
-    for (uint32_t i = 0; i < m_lstColorResolveTextures.size(); i++)
+    for (uint32_t i = 0; i < uResolveTextureCount; i++)
     {
       Texture* pTexture = m_lstColorResolveTextures[i];
-      CreateImageView(
+      if (!CreateImageView(
         pTexture->m_hImage,
         pTexture->m_eFormat,
         0u, 1u,
         0u, pTexture->m_uLayers,
         pTexture->m_uLayers > 1u ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
         VK_IMAGE_ASPECT_COLOR_BIT,
-        m_pRenderTarget->m_aImageViews[uAttachmentIdx++]);
+        m_pRenderTarget->m_aImageViews[uAttachmentIdx++]))
+      {
+        return false;
+      }
 
       m_pRenderTarget->m_aResolveTextures[i] = pTexture;
     }    
 
     if(m_pDepthStencilTexture)
     {
-      CreateImageView(
+      if (!CreateImageView(
         m_pDepthStencilTexture->m_hImage,
         m_pDepthStencilTexture->m_eFormat,
         m_uDepthMipLevel, 1u,
         0u, m_pDepthStencilTexture->m_uLayers,
         m_pDepthStencilTexture->m_uLayers > 1u ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
         VK_IMAGE_ASPECT_DEPTH_BIT,
-        m_pRenderTarget->m_aImageViews[uAttachmentIdx++]);
+        m_pRenderTarget->m_aImageViews[uAttachmentIdx++]))
+      {
+        return false;
+      }
 
       m_pRenderTarget->m_pDepthTexture = m_pDepthStencilTexture;
       m_pRenderTarget->m_uDepthTextureMipLevel = m_uDepthMipLevel;
@@ -82,12 +98,19 @@ namespace api
     oFramebufferInfo.height = m_uHeight;
     oFramebufferInfo.layers = (m_lstColorTextures.size() > 0u) ? m_lstColorTextures[0]->m_uLayers : 1u;
 
-    VK_CHECK(vkCreateFramebuffer(s_oGlobalData.m_oWindow.m_hDevice, &oFramebufferInfo, NULL, &m_pRenderTarget->m_hFrameBuffer))
+    VkFramebuffer hFrameBuffer = VK_NULL_HANDLE;
+    if (!VK_OK(vkCreateFramebuffer(s_oGlobalData.m_oWindow.m_hDevice, &oFramebufferInfo, NULL, &hFrameBuffer)))
+    {
+      return false;
+    }
+    m_pRenderTarget->m_hFrameBuffer = hFrameBuffer;
 
     m_pRenderTarget->m_uWidth = m_uWidth;
     m_pRenderTarget->m_uHeight = m_uHeight;
     m_pRenderTarget->m_uMsaaSamples = m_uMsaaSamples;
-    m_pRenderTarget->m_uAttachmentCount = m_lstColorTextures.size();
+    m_pRenderTarget->m_uAttachmentCount = uColorTextureCount;
+
+    return true;
   }
 
 }

@@ -5,7 +5,7 @@
 namespace api
 {
 
-  void RenderTargetBuilder::Build()
+  bool RenderTargetBuilder::Build()
   {     
     m_pRenderTarget->m_uMsaaSamples = m_uMsaaSamples;
 
@@ -39,7 +39,10 @@ namespace api
       }
 
       Texture* pTexture = m_lstColorTextures[i];
-      DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateRenderTargetView(pTexture->m_pTexture.Get(), &oRtvDesc, m_pRenderTarget->m_lstRtv[i].GetAddressOf()))
+      if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateRenderTargetView(pTexture->m_pTexture.Get(), &oRtvDesc, m_pRenderTarget->m_lstRtv[i].GetAddressOf())))
+      {
+        return false;
+      }
 
       m_pRenderTarget->m_lstTextures.push_back(pTexture);
     }
@@ -47,7 +50,10 @@ namespace api
     for (int i = 0; i < m_lstColorResolveTextures.size(); i++)
     {
       Texture* pTexture = m_lstColorResolveTextures[i];
-      DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateRenderTargetView(pTexture->m_pTexture.Get(), &oRtvDesc, m_pRenderTarget->m_lstRtv[i].GetAddressOf()))
+      if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateRenderTargetView(pTexture->m_pTexture.Get(), &oRtvDesc, m_pRenderTarget->m_lstRtv[i].GetAddressOf())))
+      {
+        return false;
+      }
 
       m_pRenderTarget->m_lstTextures.push_back(pTexture);
     }
@@ -69,13 +75,18 @@ namespace api
         descDSV.Texture2D.MipSlice = m_uDepthMipLevel;
       }      
 
-      DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateDepthStencilView(m_pDepthStencilTexture->m_pTexture.Get(), &descDSV, m_pRenderTarget->m_pDsv.ReleaseAndGetAddressOf()));
+      if (!DX11_OK(s_oGlobalData.m_oWindow.m_pDevice->CreateDepthStencilView(m_pDepthStencilTexture->m_pTexture.Get(), &descDSV, m_pRenderTarget->m_pDsv.ReleaseAndGetAddressOf())))
+      {
+        return false;
+      }
 
       m_pRenderTarget->m_lstTextures.push_back(m_pDepthStencilTexture);
     }
 
     m_pRenderTarget->m_iWidth = static_cast<int>(m_uWidth);
     m_pRenderTarget->m_iHeight = static_cast<int>(m_uHeight);
+
+    return true;
   }
 
   void RenderTargetBuilder::Clear()

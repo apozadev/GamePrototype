@@ -3,7 +3,11 @@
 #include <string.h>
 #include <thread>
 
+#include "imgui.h"
+#include "backends/imgui_impl_win32.h"
+
 #include "API/GraphicsAPI.h"
+#include "API/ImGuiRenderer.h"
 #include "Asserts.h"
 #include "Memory/ThreadArenas.h"
 #include "Platform/Debug.h"
@@ -11,6 +15,9 @@
 #include "ResourceLoader.h"
 
 #include "../../Game.h"
+
+// Declared by imgui_impl_win32.h only in a comment (it would drag windows.h into the header)
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 static bool g_bRunning = true;
 
@@ -33,6 +40,14 @@ LRESULT WndProc(
   WPARAM _wParam,
   LPARAM _lParam)
 {
+  // Input for ImGui. Messages and ImGui frames are both handled on this thread, so ImGui
+  // never sees input change mid-frame. Returns 0 until ImGui_ImplWin32_Init has run
+  // (it checks for a context, and the context is only created after the window).
+  if (ImGui_ImplWin32_WndProcHandler(_hWnd, _uMsg, _wParam, _lParam))
+  {
+    return true;
+  }
+
   LRESULT result = 0;
 
   switch (_uMsg)
@@ -145,9 +160,8 @@ int WINAPI WinMain(
     }
   }
 
-  // Before anything else: an escaped exception becomes a fatal error with a message.
-  // The render and loader threads install their own.
-  platform::InstallFatalErrorHandlersForThread();
+  // Before anything else, and before starting threads: the handlers are process-wide
+  platform::InstallFatalErrorHandlers();
 
   ThreadArenas* pArenas = CreateThreadArenas(g_oMainThreadArenasConfig);
 
@@ -186,11 +200,22 @@ int WINAPI WinMain(
 
   FATAL_ASSERT_MSG_FORMAT(hWnd != NULL, "CreateWindowEx failed (error %lu)", GetLastError()); 
 
-  const bool bAPIInitialized = api::Initialize();
-  FATAL_ASSERT_MSG(bAPIInitialized, "Graphics API initialization failed (see log)");
+  // Both are fatal on failure
+  api::Initialize();
+  api::CreateAPIWindow(&pArenas->oGlobal, hWnd, /*msaa=*/1);
 
-  const bool bWindowCreated = api::CreateAPIWindow(&pArenas->oGlobal, hWnd, /*msaa=*/1);
-  FATAL_ASSERT_MSG(bWindowCreated, "Graphics API window creation failed (see log)");
+  // ImGui: the context and the Win32 half live here, on the main thread, which runs the
+  // ImGui frames (around Game_Update). The backend only draws copies of the draw data.
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+  ImGui::StyleColorsDark();
+
+  const bool bImGuiWin32Initialized = ImGui_ImplWin32_Init(hWnd);
+  FATAL_ASSERT_MSG(bImGuiWin32Initialized, "ImGui_ImplWin32_Init failed");
+
+  // Still on the main thread: the render thread doesn't exist yet. Builds the font atlas.
+  api::ImGuiRendererInit();
 
   // From here on, only the render thread touches the graphics API
   // (until it is joined below).
@@ -217,9 +242,22 @@ int WINAPI WinMain(
     }
     
     pArenas->oFrame.Reset();
-    Game_Update(pArenas, g_fDeltaTime);
 
-    Sleep(16);     // just to slow down the loop a bit, not required            
+    // Before acquiring the mailbox: NewFrame doesn't touch render state
+    ImGui_ImplWin32_NewFrame(); // Display size, mouse cursor, gamepad
+    ImGui::NewFrame();
+
+    // Blocks while the render thread still holds this mailbox (at most one frame ahead)
+    const MailboxHandle hMailbox = AcquireMailboxWrite();
+
+    Game_Update(pArenas, hMailbox, g_fDeltaTime);
+
+    ImGui::Render();
+    SubmitImGuiDrawData(hMailbox, ImGui::GetDrawData());
+
+    ReleaseMailboxWrite(hMailbox);
+
+    Sleep(16);     // just to slow down the loop a bit, not required
     
     DWORD64 ulEndCycleCount = __rdtsc();
     //DWORD64 ulElapsedCycleCount = ulEndCycleCount - ulBeginCycleCount;
@@ -258,8 +296,12 @@ int WINAPI WinMain(
   oRenderThread.join();
 
   // Render thread is gone, the main thread owns the API again
+  api::ImGuiRendererShutdown();
   api::DestroyWindow();
   api::ShutDown();
+
+  ImGui_ImplWin32_Shutdown();
+  ImGui::DestroyContext();
 
   // Both threads are joined: nothing references the request rings anymore
   DestroyThreadArenas(pArenas);

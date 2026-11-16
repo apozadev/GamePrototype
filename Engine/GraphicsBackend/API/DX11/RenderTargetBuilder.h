@@ -21,7 +21,8 @@ namespace api
 
     void AddResolveColorTexture(Texture* _pTexture){ m_lstColorResolveTextures.push_back(_pTexture); }           
 
-    void Build();
+    // Returns false if a view cannot be created (logged)
+    bool Build();
 
     void Clear();
 

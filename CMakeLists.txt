@@ -11,6 +11,16 @@ endif()
 
 project ("GamePrototype")
 
+# No exceptions anywhere: errors are return values, or fatal asserts (Engine/Asserts.h).
+# Applied to every target (including third party) so the whole program agrees on the
+# standard library configuration. With _HAS_EXCEPTIONS=0 the STL reports its own
+# failures through a raise handler instead (see Engine/Platform/Debug.h).
+if (MSVC)
+  string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/EHs-c->)
+  add_compile_definitions(_HAS_EXCEPTIONS=0)
+endif()
+
 # Dear ImGui
 add_library(ImGui STATIC
   imgui/imgui.cpp

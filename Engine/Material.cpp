@@ -159,18 +159,18 @@ static bool BuildMaterial(LinearAllocator* _pAllocator, Material* _pMaterial, co
 
 Material* CreateMaterial(LinearAllocator* _pAllocator, const RenderStateInfo& _oInfo)
 {
-  const size_t zMark = _pAllocator->PeekCurrent();
+  ScopedRollback oRollback(_pAllocator);
 
   Material* pMaterial = NewObject<Material>(_pAllocator);
 
   if (!BuildMaterial(_pAllocator, pMaterial, _oInfo))
   {
-    // Release whatever was created, then hand back everything allocated since zMark
+    // Release whatever was created; oRollback then hands back the memory
     DestroyMaterial(pMaterial);
-    _pAllocator->Rollback(zMark);
     return nullptr;
   }
 
+  oRollback.Commit();
   return pMaterial;
 }
 

@@ -3,7 +3,7 @@
 #include <dxgidebug.h>
 #include <cstring>
 
-#include "Exception.h"
+#include "Asserts.h"
 #include "TextureUsage.h"
 #include "API/DX11/Window.h"
 #include "API/DX11/RenderState.h"
@@ -17,10 +17,8 @@ namespace api
   {
 
     RECT rect;
-    if (!GetClientRect(s_oGlobalData.m_oWindow.m_hWnd, &rect))
-    {
-      THROW_GENERIC_EXCEPTION("[DX11] Could not get window rect")
-    }
+    const BOOL bGotRect = GetClientRect(s_oGlobalData.m_oWindow.m_hWnd, &rect);
+    FATAL_ASSERT_MSG_FORMAT(bGotRect, "[DX11] Could not get window rect (error %lu)", GetLastError());
 
     s_oGlobalData.m_oWindow.m_uWidth = rect.right - rect.left;
     s_oGlobalData.m_oWindow.m_uHeight = rect.bottom - rect.top;
@@ -258,10 +256,8 @@ namespace api
     {
       return D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     }
-    else
-    {
-      THROW_GENERIC_EXCEPTION("[API] [DX11] Sampler filter combination not supported")
-    }
+    ASSERT_MSG(false, "[DX11] Sampler filter combination not supported, using linear");
+    return D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   }
 
   D3D11_CULL_MODE GetD3D11CullMode(CullMode _eCullMode)
@@ -327,7 +323,7 @@ namespace api
     uSwapCreateFlags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
 
-    DX11_CHECK(D3D11CreateDeviceAndSwapChain(
+    DX11_CHECK_FATAL(D3D11CreateDeviceAndSwapChain(
       nullptr,
       D3D_DRIVER_TYPE_HARDWARE,
       nullptr,
@@ -386,7 +382,7 @@ namespace api
     oDSTexDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
     oDSTexDesc.CPUAccessFlags = 0;
     oDSTexDesc.MiscFlags = 0;
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateTexture2D(&oDSTexDesc, NULL, s_oGlobalData.m_oWindow.m_pDSTexture.GetAddressOf()));
+    DX11_CHECK_FATAL(s_oGlobalData.m_oWindow.m_pDevice->CreateTexture2D(&oDSTexDesc, NULL, s_oGlobalData.m_oWindow.m_pDSTexture.GetAddressOf()));
 
     // Create DSV      
 
@@ -394,7 +390,7 @@ namespace api
     descDSV.Format = DXGI_FORMAT_D32_FLOAT;
     descDSV.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DMS;
     descDSV.Texture2D.MipSlice = 0u;
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateDepthStencilView(s_oGlobalData.m_oWindow.m_pDSTexture.Get(), &descDSV, s_oGlobalData.m_oWindow.m_pDsv.GetAddressOf()));
+    DX11_CHECK_FATAL(s_oGlobalData.m_oWindow.m_pDevice->CreateDepthStencilView(s_oGlobalData.m_oWindow.m_pDSTexture.Get(), &descDSV, s_oGlobalData.m_oWindow.m_pDsv.GetAddressOf()));
 
     if (s_oGlobalData.m_oWindow.m_uMsaaSamples > 1u)
     {
@@ -412,7 +408,7 @@ namespace api
       oTexDesc.Usage = D3D11_USAGE_DEFAULT;
       oTexDesc.CPUAccessFlags = 0;
 
-      DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateTexture2D(&oTexDesc, NULL, s_oGlobalData.m_oWindow.m_pColorTexture.GetAddressOf()));
+      DX11_CHECK_FATAL(s_oGlobalData.m_oWindow.m_pDevice->CreateTexture2D(&oTexDesc, NULL, s_oGlobalData.m_oWindow.m_pColorTexture.GetAddressOf()));
 
       // Create Render Target View
 
@@ -421,13 +417,13 @@ namespace api
       oRtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
       oRtvDesc.Texture2D.MipSlice = 0;
 
-      DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateRenderTargetView(s_oGlobalData.m_oWindow.m_pColorTexture.Get(), &oRtvDesc, s_oGlobalData.m_oWindow.m_pRtv.GetAddressOf()))
+      DX11_CHECK_FATAL(s_oGlobalData.m_oWindow.m_pDevice->CreateRenderTargetView(s_oGlobalData.m_oWindow.m_pColorTexture.Get(), &oRtvDesc, s_oGlobalData.m_oWindow.m_pRtv.GetAddressOf()));
     }
     else
     {
       // Get back buffer
       Microsoft::WRL::ComPtr<ID3D11Texture2D> pBackBuffer;
-      DX11_CHECK(s_oGlobalData.m_oWindow.m_pSwapchain->GetBuffer(0, __uuidof(ID3D11Resource), reinterpret_cast<void**>(pBackBuffer.GetAddressOf())));
+      DX11_CHECK_FATAL(s_oGlobalData.m_oWindow.m_pSwapchain->GetBuffer(0, __uuidof(ID3D11Resource), reinterpret_cast<void**>(pBackBuffer.GetAddressOf())));
 
       // Create Render Target View
 
@@ -436,7 +432,7 @@ namespace api
       oRtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
       oRtvDesc.Texture2D.MipSlice = 0;*/
 
-      DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->CreateRenderTargetView(pBackBuffer.Get(), nullptr, s_oGlobalData.m_oWindow.m_pRtv.GetAddressOf()))
+      DX11_CHECK_FATAL(s_oGlobalData.m_oWindow.m_pDevice->CreateRenderTargetView(pBackBuffer.Get(), nullptr, s_oGlobalData.m_oWindow.m_pRtv.GetAddressOf()));
 
     }
 
@@ -447,7 +443,7 @@ namespace api
     PollWindowSize();
 
     /*ID3D11Debug* pDebug;
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pDevice->QueryInterface(__uuidof(ID3D11Debug), reinterpret_cast<void**>(&pDebug)));
+    DX11_CHECK_FATAL(s_oGlobalData.m_oWindow.m_pDevice->QueryInterface(__uuidof(ID3D11Debug), reinterpret_cast<void**>(&pDebug)));
     pDebug->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL);
     pDebug->Release();*/
 
@@ -460,7 +456,7 @@ namespace api
     s_oGlobalData.m_oWindow.m_pColorTexture.Reset();
     s_oGlobalData.m_oWindow.m_pDSTexture.Reset();    
 
-    DX11_CHECK(s_oGlobalData.m_oWindow.m_pSwapchain->ResizeBuffers(s_oGlobalData.m_oWindow.m_uNumSwapchainImages, s_oGlobalData.m_oWindow.m_uWidth, s_oGlobalData.m_oWindow.m_uHeight, s_oGlobalData.m_oWindow.m_eSwapchainFormat, 0u))
+    DX11_CHECK_FATAL(s_oGlobalData.m_oWindow.m_pSwapchain->ResizeBuffers(s_oGlobalData.m_oWindow.m_uNumSwapchainImages, s_oGlobalData.m_oWindow.m_uWidth, s_oGlobalData.m_oWindow.m_uHeight, s_oGlobalData.m_oWindow.m_eSwapchainFormat, 0u));
 
     CreateWindowRenderTarget();
   }
@@ -518,7 +514,10 @@ namespace api
   uint32_t GetBindFromReflection(ID3D11ShaderReflection* _pReflection, const char* _sName, _D3D_SHADER_INPUT_TYPE _eInputType)
   {
     D3D11_SHADER_DESC oShaderDesc;
-    DX11_CHECK(_pReflection->GetDesc(&oShaderDesc))
+    if (!DX11_OK(_pReflection->GetDesc(&oShaderDesc)))
+    {
+      return 0xFFFFFFFF;
+    }
 
     for (UINT i = 0; i < oShaderDesc.BoundResources; ++i)
     {

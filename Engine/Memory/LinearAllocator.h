@@ -13,9 +13,12 @@ struct LinearAllocator
   LinearAllocator& operator=(const LinearAllocator&) = delete;
 
   void* Allocate(size_t size, size_t alignment = alignof(std::max_align_t));
-  size_t PeekCurrent();
-  void Rollback(size_t _zMark);
   void Reset();
+  size_t PeekCurrent();
+
+private:
+  friend class ScopedRollback;  
+  void Rollback(size_t _zMark);
 
 private:
   char* m_pStart;
@@ -53,3 +56,46 @@ T* NewArray(LinearAllocator* _pAllocator, size_t _zCount)
   }
   return pArray;
 }
+
+// Hands back everything allocated from _pAllocator during its lifetime, unless Commit()
+// is called. Prefer it to PeekCurrent/Rollback: every early return is covered.
+//
+//   Scratch memory, always given back:      Keep on success, give back on failure:
+//     {                                       ScopedRollback oRollback(_pAllocator);
+//       ScopedRollback oTemp(_pAllocator);    if (!Build(...)) { Destroy(...); return nullptr; }
+//       ...                                   oRollback.Commit();
+//     }                                       return pObject;
+//
+// Like Rollback, it never runs destructors: release what the memory holds (API objects,
+// _pObj->~T()) before the scope ends. Declaring the guard first makes it run last.
+// Nested guards must end in reverse order of creation, which scopes guarantee.
+class ScopedRollback
+{
+public:
+  // [[nodiscard]]: an unnamed ScopedRollback{_pAllocator}; would roll back at once
+  [[nodiscard]] explicit ScopedRollback(LinearAllocator* _pAllocator)
+    : m_pAllocator(_pAllocator), m_zMark(_pAllocator->PeekCurrent())
+  {
+  }
+
+  ~ScopedRollback()
+  {
+    if (m_pAllocator)
+    {
+      m_pAllocator->Rollback(m_zMark);
+    }
+  }
+
+  // Keeps everything allocated since construction. The scope does nothing after this.
+  void Commit()
+  {
+    m_pAllocator = nullptr;
+  }
+
+  ScopedRollback(const ScopedRollback&) = delete;
+  ScopedRollback& operator=(const ScopedRollback&) = delete;
+
+private:
+  LinearAllocator* m_pAllocator;
+  size_t m_zMark;
+};

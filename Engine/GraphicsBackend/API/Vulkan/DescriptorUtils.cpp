@@ -1,6 +1,6 @@
 #include "API/Vulkan/DescriptorUtils.h"
 
-#include "Exception.h"
+#include "Asserts.h"
 
 #include "API/Vulkan/VulkanMacros.h"
 #include "API/Vulkan/Window.h"
@@ -43,14 +43,16 @@ VkDescriptorSetLayout DescriptorSetLayoutBuilder::Build(VkDevice _hDevice)
 
   VkDescriptorSetLayoutCreateInfo oDescSetLayoutInfo{};
   oDescSetLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  oDescSetLayoutInfo.bindingCount = m_lstDescriptors.size();
+  oDescSetLayoutInfo.bindingCount = static_cast<uint32_t>(m_lstDescriptors.size());
   oDescSetLayoutInfo.pBindings = m_lstDescriptors.data();
 
-  VkDescriptorSetLayout hDescSetLayout;
+  VkDescriptorSetLayout hDescSetLayout = VK_NULL_HANDLE;
+  if (!VK_OK(vkCreateDescriptorSetLayout(_hDevice, &oDescSetLayoutInfo, NULL, &hDescSetLayout)))
+  {
+    return VK_NULL_HANDLE;
+  }
 
-  VK_CHECK(vkCreateDescriptorSetLayout(_hDevice, &oDescSetLayoutInfo, NULL, &hDescSetLayout))
-
-    return hDescSetLayout;
+  return hDescSetLayout;
 }
 
 bool DescriptorSetLayoutBuilder::Contains(VkDescriptorSetLayoutBinding _oBinding) const
@@ -91,7 +93,7 @@ void DescriptorPoolBuilder::AddPoolSize(VkDescriptorPoolSize&& _rPoolSize)
 
   for (VkDescriptorPoolSize& rPoolSize : m_lstPoolSizes)
   {
-    if (rPoolSize.uType == _rPoolSize.uType)
+    if (rPoolSize.type == _rPoolSize.type)
     {
       rPoolSize.descriptorCount += _rPoolSize.descriptorCount;
       return;
@@ -107,12 +109,13 @@ VkDescriptorPool DescriptorPoolBuilder::Build(VkDevice _hDevice)
   VkDescriptorPoolCreateInfo oDescPoolInfo{};
   oDescPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
   oDescPoolInfo.flags = 0;
-  oDescPoolInfo.poolSizeCount = m_lstPoolSizes.size();
+  oDescPoolInfo.poolSizeCount = static_cast<uint32_t>(m_lstPoolSizes.size());
   oDescPoolInfo.pPoolSizes = m_lstPoolSizes.data();
   oDescPoolInfo.maxSets = m_uSwapchainSize;
 
-  VkDescriptorPool hDescPool;
-  VK_CHECK(vkCreateDescriptorPool(_hDevice, &oDescPoolInfo, NULL, &hDescPool));
+  // Pools are created during device setup
+  VkDescriptorPool hDescPool = VK_NULL_HANDLE;
+  VK_CHECK_FATAL(vkCreateDescriptorPool(_hDevice, &oDescPoolInfo, NULL, &hDescPool));
 
   return hDescPool;
 }
@@ -173,7 +176,7 @@ void DescriptorSetUpdater::Update()
   { 
     VkDescriptorSetLayoutBinding oBinding{};
     oBinding.binding = lstSetBufferInfo.m_uBinding;
-    oBinding.descriptorCount = lstSetBufferInfo.m_lstBufferInfos.size();
+    oBinding.descriptorCount = static_cast<uint32_t>(lstSetBufferInfo.m_lstBufferInfos.size());
     oBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     oBinding.stageFlags = GetVkShaderFlags(lstSetBufferInfo.m_uStageFlags);
     /*if (m_pLayoutBuilder != nullptr && !m_pLayoutBuilder->Contains(oBinding))
@@ -181,9 +184,10 @@ void DescriptorSetUpdater::Update()
       continue;
     }*/
 
-    if (lstSetBufferInfo.m_uSetIdx > s_oGlobalData.m_oWindow.m_uSwapchainImageCount)
+    if (lstSetBufferInfo.m_uSetIdx >= s_oGlobalData.m_oWindow.m_uSwapchainImageCount)
     {
-      THROW_GENERIC_EXCEPTION("WTF?")
+      ASSERT_MSG_FORMAT(false, "[Vulkan] Descriptor set index %u out of range", lstSetBufferInfo.m_uSetIdx);
+      continue;
     }
 
     VkWriteDescriptorSet oUboWriteDescSet{};
@@ -192,7 +196,7 @@ void DescriptorSetUpdater::Update()
     oUboWriteDescSet.dstBinding = lstSetBufferInfo.m_uBinding;
     oUboWriteDescSet.dstArrayElement = 0;
     oUboWriteDescSet.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    oUboWriteDescSet.descriptorCount = lstSetBufferInfo.m_lstBufferInfos.size();
+    oUboWriteDescSet.descriptorCount = static_cast<uint32_t>(lstSetBufferInfo.m_lstBufferInfos.size());
     oUboWriteDescSet.pBufferInfo = lstSetBufferInfo.m_lstBufferInfos.data();
     oUboWriteDescSet.pImageInfo = NULL;
     oUboWriteDescSet.pTexelBufferView = NULL;
@@ -206,7 +210,7 @@ void DescriptorSetUpdater::Update()
 
     VkDescriptorSetLayoutBinding oBinding{};
     oBinding.binding = lstSetImageInfo.m_uBinding;
-    oBinding.descriptorCount = lstSetImageInfo.m_lstImgInfos.size();
+    oBinding.descriptorCount = static_cast<uint32_t>(lstSetImageInfo.m_lstImgInfos.size());
     oBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     oBinding.stageFlags = GetVkShaderFlags(lstSetImageInfo.m_uStageFlags);
     /*if (m_pLayoutBuilder != nullptr && !m_pLayoutBuilder->Contains(oBinding))
@@ -214,9 +218,10 @@ void DescriptorSetUpdater::Update()
       continue;
     }*/
 
-    if (lstSetImageInfo.m_uSetIdx > s_oGlobalData.m_oWindow.m_uSwapchainImageCount)
+    if (lstSetImageInfo.m_uSetIdx >= s_oGlobalData.m_oWindow.m_uSwapchainImageCount)
     {
-      THROW_GENERIC_EXCEPTION("WTF?")
+      ASSERT_MSG_FORMAT(false, "[Vulkan] Descriptor set index %u out of range", lstSetImageInfo.m_uSetIdx);
+      continue;
     }
 
     VkWriteDescriptorSet oImageWriteDescSet{};
@@ -225,7 +230,7 @@ void DescriptorSetUpdater::Update()
     oImageWriteDescSet.dstBinding = lstSetImageInfo.m_uBinding;
     oImageWriteDescSet.dstArrayElement = 0;
     oImageWriteDescSet.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    oImageWriteDescSet.descriptorCount = lstSetImageInfo.m_lstImgInfos.size();
+    oImageWriteDescSet.descriptorCount = static_cast<uint32_t>(lstSetImageInfo.m_lstImgInfos.size());
     oImageWriteDescSet.pBufferInfo = NULL;
     oImageWriteDescSet.pImageInfo = lstSetImageInfo.m_lstImgInfos.data();
 
@@ -287,7 +292,7 @@ void DescriptorSetUpdater::Update()
 
   if (!lstWriteDescSets.empty())
   {
-    vkUpdateDescriptorSets(s_oGlobalData.m_oWindow.m_hDevice, lstWriteDescSets.size(), lstWriteDescSets.data(), 0, nullptr);
+    vkUpdateDescriptorSets(s_oGlobalData.m_oWindow.m_hDevice, static_cast<uint32_t>(lstWriteDescSets.size()), lstWriteDescSets.data(), 0, nullptr);
   }
 }
 

@@ -28,8 +28,12 @@ size_t LinearAllocator::PeekCurrent()
 
 void LinearAllocator::Rollback(size_t _zMark)
 {
-  ASSERT_MSG_FORMAT(_zMark <= m_zSize, "Invalid mark for rollback: %zu (size %zu)", _zMark, m_zSize);
-  if (_zMark <= m_zSize)
+  // A mark ahead of the current position comes from another allocator, or from a scope
+  // that ended out of order (an outer rollback already ran): "rolling back" would
+  // re-expose memory that is free, or hand out memory that is still in use.
+  const size_t zCurrent = PeekCurrent();
+  ASSERT_MSG_FORMAT(_zMark <= zCurrent, "Invalid mark for rollback: %zu is ahead of the current position %zu", _zMark, zCurrent);
+  if (_zMark <= zCurrent)
   {
     m_pCurrent = m_pStart + _zMark;
   }

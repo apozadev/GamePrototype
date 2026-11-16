@@ -39,7 +39,8 @@ namespace api
       m_lstColorResolveTextures.push_back(_pTexture);
     }
 
-    void Build();
+    // Returns false on failure (logged); the caller destroys the render target
+    bool Build();
 
     void Clear()
     {

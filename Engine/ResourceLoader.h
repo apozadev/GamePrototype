@@ -28,18 +28,13 @@ enum class ResourceState
   COUNT
 };
 
-// LoadResourceAsync copies the vertex/index data into the request: the caller
-// can free or reuse its buffers as soon as the call returns.
+// Filenames are copied into the request, they don't need to outlive the call.
 struct MeshLoadRequestInfo
 {
   static constexpr ResourceType eType = ResourceType::MESH;
-  const void* pVertexData;
-  size_t zVertexDataSize;
-  const void* pIndexData;
-  size_t zIndexDataSize;
+  const char* pFilename; // .obj
 };
 
-// Filenames are copied too, they don't need to outlive the call.
 struct MaterialLoadRequestInfo
 {
   static constexpr ResourceType eType = ResourceType::MATERIAL;

@@ -5,7 +5,7 @@
 
 #include "3rd/spirv-reflect/spirv_reflect.h"
 
-#include "InFile.h"
+#include "ShaderCode.h"
 #include "RenderStateInfo.h"
 #include "PipelineStage.h"
 #include "BlendEnums.h"
@@ -55,7 +55,8 @@ namespace api
 
   void CreatePhysicalDevice();
 
-  void CreatePipeline(const file::InFile& _oVSFile, const file::InFile& _oPSFile, const file::InFile* _pGSFile, const RenderStateInfo& _oInfo, VkRenderPass _hRenderPass, VkSampleCountFlagBits _uMsaaSamples, uint32_t _uAttachmentCount, RenderState* _pRenderState_);
+  // Returns false on failure (logged); the caller destroys the render state
+  bool CreatePipeline(const ShaderCode& _oVS, const ShaderCode& _oPS, const ShaderCode* _pGS, const RenderStateInfo& _oInfo, VkRenderPass _hRenderPass, VkSampleCountFlagBits _uMsaaSamples, uint32_t _uAttachmentCount, RenderState* _pRenderState_);
 
   void CreateLogicalDevice();
 
@@ -69,7 +70,7 @@ namespace api
 
   void CreateSwapchain();
 
-  void CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool _bHasDepthStencil, VkFormat _eDepthStencilFormat, uint32_t _uMsaaSampleCount, VkRenderPass& hRenderPass_, bool _bOffscreen, bool _bMultiview = false);  
+  bool CreateRenderPass(uint32_t _uNumColorTextures, VkFormat _eColorFormat, bool _bHasDepthStencil, VkFormat _eDepthStencilFormat, uint32_t _uMsaaSampleCount, VkRenderPass& hRenderPass_, bool _bOffscreen, bool _bMultiview = false);  
 
   void CreateCommandBuffers();
 
@@ -81,20 +82,25 @@ namespace api
 
   void RecreateSwapchain();
 
+  constexpr uint32_t INVALID_MEMORY_TYPE = 0xFFFFFFFFu;
+
+  // INVALID_MEMORY_TYPE if none matches (logged)
   uint32_t FindMemoryType(uint32_t _uTypeFilter, VkMemoryPropertyFlags _uProperties);
 
-  void CreateBuffer(size_t _uSize, VkBufferUsageFlags _uUsage, VkMemoryPropertyFlags _uProperties, VkBuffer& hBuffer_, VkDeviceMemory& hDeviceMemory_);
+  // Creation helpers: return false on failure (logged) and leave the outputs as VK_NULL_HANDLE
+  bool CreateBuffer(size_t _uSize, VkBufferUsageFlags _uUsage, VkMemoryPropertyFlags _uProperties, VkBuffer& hBuffer_, VkDeviceMemory& hDeviceMemory_);
 
-  void CreateImage(uint32_t _uWidth, uint32_t _uHeight, VkFormat _eFormat, uint32_t _uMipLevels, uint32_t _uLayers, VkSampleCountFlagBits _eMsaaSampleCount, VkImageTiling _eTiling, VkImageUsageFlags _uUsage, VkImageCreateFlags _uCreateFlags, VkMemoryPropertyFlags _uProperties, VkImage& hImage_, VkDeviceMemory& hMemory_);
+  bool CreateImage(uint32_t _uWidth, uint32_t _uHeight, VkFormat _eFormat, uint32_t _uMipLevels, uint32_t _uLayers, VkSampleCountFlagBits _eMsaaSampleCount, VkImageTiling _eTiling, VkImageUsageFlags _uUsage, VkImageCreateFlags _uCreateFlags, VkMemoryPropertyFlags _uProperties, VkImage& hImage_, VkDeviceMemory& hMemory_);
 
-  void CreateImageView(VkImage _hImage, VkFormat _eFormat, uint32_t _uBaseMip, uint32_t _uMipLevels, uint32_t _uBaseLayer, uint32_t _uLayers, VkImageViewType _eViewType, VkImageAspectFlags _uAspectFlags, VkImageView& hImageView_);
+  bool CreateImageView(VkImage _hImage, VkFormat _eFormat, uint32_t _uBaseMip, uint32_t _uMipLevels, uint32_t _uBaseLayer, uint32_t _uLayers, VkImageViewType _eViewType, VkImageAspectFlags _uAspectFlags, VkImageView& hImageView_);
 
-  void CreateTextureSampler(Texture* _pTexture, uint32_t _uMipLevels, const SamplerConfig& _rSamplerConfig);
+  bool CreateTextureSampler(Texture* _pTexture, uint32_t _uMipLevels, const SamplerConfig& _rSamplerConfig);
 
   void DestroyBuffer(VkBuffer _hBuffer, VkDeviceMemory _hDeviceMemory_);
 
-  void SetBufferData(const void* _pData, size_t _uSize, VkDeviceMemory& hDeviceMemory_);
+  bool SetBufferData(const void* _pData, size_t _uSize, VkDeviceMemory& hDeviceMemory_);
 
+  // Fatal on failure: only fails when the device itself is in trouble
   VkCommandBuffer BeginTempCmdBuffer();
 
   void EndTempCmdBuffer(VkCommandBuffer _hCmdBuffer);
@@ -116,7 +122,5 @@ namespace api
   void AddBufferToDescSetUpdater(ConstantBuffer* _pCBuffer, size_t _uSize, uint32_t uBinding, PipelineStageFlags _uStageFlags);
 
   void AddImageToDescSetUpdater(Texture* _pTexture, uint32_t uBinding, PipelineStageFlags _uStageFlags);
-
-  void SetupImGui();
 
 } // namespace api
