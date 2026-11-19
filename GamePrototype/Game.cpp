@@ -45,10 +45,8 @@ void Game_Update(ThreadArenas* /*_pArenas*/, MailboxHandle _hMailbox, float _fDe
   ImGui::Checkbox("Cycle triangle color", &s_bCycleColor);
   ImGui::End();
 
-  // Create the render object once its resources are on the GPU
-  if (s_hTriangle == 0 &&
-    GetResourceState(s_hTriangleMesh) == ResourceState::READY &&
-    GetResourceState(s_hTriangleMaterial) == ResourceState::READY)
+  // Retried next frame if the mailbox was full. Drawn as soon as its resources are created.
+  if (s_hTriangle == 0)
   {
     s_hTriangle = CreateRenderObject(_hMailbox);
     SetRenderObjectMesh(_hMailbox, s_hTriangle, s_hTriangleMesh);
@@ -56,17 +54,14 @@ void Game_Update(ThreadArenas* /*_pArenas*/, MailboxHandle _hMailbox, float _fDe
   }
 
   // Cycle through hues, one RGB channel 120 degrees apart from the next
-  if (s_hTriangle != 0)
-  {
-    const float fPhase = 2.0943951f; // 2*pi/3
-    const float vColor[4] = {
-      0.5f + 0.5f * sinf(s_fTime),
-      0.5f + 0.5f * sinf(s_fTime + fPhase),
-      0.5f + 0.5f * sinf(s_fTime + 2.f * fPhase),
-      1.f
-    };
-    SetMaterialProperty(_hMailbox, s_hTriangleMaterial, "color", vColor, sizeof(vColor));
-  }
+  const float fPhase = 2.0943951f; // 2*pi/3
+  const float vColor[4] = {
+    0.5f + 0.5f * sinf(s_fTime),
+    0.5f + 0.5f * sinf(s_fTime + fPhase),
+    0.5f + 0.5f * sinf(s_fTime + 2.f * fPhase),
+    1.f
+  };
+  SetMaterialProperty(_hMailbox, s_hTriangleMaterial, "color", vColor, sizeof(vColor));
 }
 
 void Game_Shutdown(ThreadArenas* /*_pArenas*/)

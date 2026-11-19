@@ -344,11 +344,13 @@ static void ProcessLoadRequest(LinearAllocator* _pScratch, const ResourceLoadReq
     break;
   default:
     ASSERT_MSG_FORMAT(false, "Resource %u: unhandled load request type %d", _pRequest->hHandle, static_cast<int>(_pRequest->eType));
-    break;
+    ResourceFailedCallback(_pRequest->hHandle);
+    return;
   }
 
+  // Through the render thread, so the error mesh/material is in place by the time the state is FAILED
   if (!bSucceeded)
   {
-    ResourceFailedCallback(_pRequest->hHandle);
+    RequestResourceFailed(_pRequest->hHandle, _pRequest->eType);
   }
 }

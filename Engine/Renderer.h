@@ -8,6 +8,7 @@ struct CreateRequestBase
 {
   ResourceHandle hHandle;
   ResourceType eType;
+  bool bLoadFailed; // Set by RequestResourceFailed: nothing to create
 };
 
 // RequestCreateMesh copies the data it points to: it only has to be valid during the call.
@@ -42,6 +43,8 @@ void RequestRenderThreadExit();
 
 // Render object API: update thread only, between AcquireMailboxWrite/ReleaseMailboxWrite.
 // Changes reach the render thread as mailbox messages.
+// Meshes and materials can be set while still loading: the object is drawn once both are
+// created, with the error mesh/material in place of a FAILED one.
 
 // Returns 0 if the mailbox is full (the object is not created; try again next frame).
 RenderObjectHandle CreateRenderObject(MailboxHandle _hMailbox);
@@ -54,7 +57,8 @@ void SetRenderObjectMaterial(MailboxHandle _hMailbox, RenderObjectHandle _hRende
 
 // Sets a shader constant by its name in the shader (e.g. "color"), in every cbuffer of the material
 // that declares it. Affects every render object using this material.
-// Ignored if the material is not READY or no shader declares the name. Max 64 bytes (float4x4).
+// Set while the material is LOADING, it is applied once it is created. Ignored if the material
+// FAILED or no shader declares the name. Max 64 bytes (float4x4).
 void SetMaterialProperty(MailboxHandle _hMailbox, ResourceHandle _hMaterial, const char* _sName, const void* _pData, uint32_t _uSize);
 
 struct ImDrawData;
@@ -74,6 +78,10 @@ void RequestWindowResize();
 bool RequestCreateMesh(const MeshCreateRequest& _oRequest);
 
 bool RequestCreateMaterial(const MaterialCreateRequest& _oRequest);
+
+// Loader thread only. The resource couldn't be loaded: the render thread moves it to FAILED
+// and draws whatever uses it with the error mesh/material.
+void RequestResourceFailed(ResourceHandle _hHandle, ResourceType _eType);
 
 MailboxHandle AcquireMailboxWrite();
 

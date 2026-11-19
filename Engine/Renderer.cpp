@@ -12,6 +12,7 @@
 #include "API/ImGuiRenderer.h"
 #include "Asserts.h"
 #include "Hash.h"
+#include "GraphicsBackend/Vertex.h"
 #include "ImGuiDrawDataCopy.h"
 #include "Log.h"
 #include "Material.h"
@@ -80,6 +81,12 @@ struct SetMaterialPropertyMessage
   uint8_t aData[MAX_MATERIAL_PROPERTY_SIZE];
 };
 
+// Properties set while their material is still loading, applied once it is created.
+// Only the latest value per (material, name) is kept. Render thread only.
+static constexpr uint32_t MAX_PENDING_MATERIAL_PROPERTIES = 256u;
+static SetMaterialPropertyMessage g_aPendingMaterialProperties[MAX_PENDING_MATERIAL_PROPERTIES];
+static uint32_t g_uPendingMaterialPropertyCount = 0u;
+
 //-----------------------------------------------------------------------------
 
 struct Mesh
@@ -128,6 +135,14 @@ static std::atomic<bool> g_bResizePending = false;
 std::unordered_map<ResourceHandle, Mesh> g_dctMeshes;
 std::unordered_map<ResourceHandle, Material*> g_dctMaterials;
 std::unordered_map<RenderObjectHandle, RenderObject> g_dctRenderObjects;
+
+// Drawn in place of failed resources. Created in the render thread's global arena;
+// a failed handle maps to them in g_dctMeshes/g_dctMaterials. Null if they couldn't be created.
+static Mesh g_oErrorMesh = {};
+static Material* g_pErrorMaterial = nullptr;
+
+static constexpr const char* ERROR_VS_FILENAME = "assets/engine/shaders/errorV.cso";
+static constexpr const char* ERROR_PS_FILENAME = "assets/engine/shaders/errorP.cso";
 
 //-----------------------------------------------------------------------------
 // Mailboxes
@@ -327,6 +342,23 @@ bool RequestCreateMesh(const MeshCreateRequest& _oRequest)
   return true;
 }
 
+void RequestResourceFailed(ResourceHandle _hHandle, ResourceType _eType)
+{
+  char* pMemory = AllocateCreateRequest(sizeof(CreateRequestBase));
+  if (!pMemory)
+  {
+    ResourceFailedCallback(_hHandle);
+    return;
+  }
+
+  CreateRequestBase* pRequest = new (pMemory) CreateRequestBase();
+  pRequest->hHandle = _hHandle;
+  pRequest->eType = _eType;
+  pRequest->bLoadFailed = true;
+
+  PublishCreateRequest();
+}
+
 // Copies _sString null-terminated to _pDest (sized with _sString.size() + 1) and points the view at the copy
 static std::string_view CopyStringView(char* _pDest, std::string_view _sString)
 {
@@ -398,12 +430,53 @@ static bool ProcessCreateMesh(LinearAllocator* _pAllocator, const MeshCreateRequ
   return true;
 }
 
+static void StorePendingMaterialProperty(const SetMaterialPropertyMessage& _oMsg)
+{
+  for (uint32_t i = 0u; i < g_uPendingMaterialPropertyCount; i++)
+  {
+    SetMaterialPropertyMessage& rPending = g_aPendingMaterialProperties[i];
+    if (rPending.hMaterial == _oMsg.hMaterial && rPending.uNameHash == _oMsg.uNameHash)
+    {
+      rPending = _oMsg;
+      return;
+    }
+  }
+
+  if (g_uPendingMaterialPropertyCount == MAX_PENDING_MATERIAL_PROPERTIES)
+  {
+    LogError("Material %u: property dropped, too many properties set on loading materials. Increase MAX_PENDING_MATERIAL_PROPERTIES", _oMsg.hMaterial);
+    return;
+  }
+  g_aPendingMaterialProperties[g_uPendingMaterialPropertyCount++] = _oMsg;
+}
+
+// Applies the material's pending properties to _pMaterial (or drops them if it is null) and forgets them
+static void FlushPendingMaterialProperties(ResourceHandle _hMaterial, Material* _pMaterial)
+{
+  uint32_t i = 0u;
+  while (i < g_uPendingMaterialPropertyCount)
+  {
+    SetMaterialPropertyMessage& rPending = g_aPendingMaterialProperties[i];
+    if (rPending.hMaterial != _hMaterial)
+    {
+      i++;
+      continue;
+    }
+
+    if (_pMaterial)
+    {
+      SetMaterialProperty(_pMaterial, rPending.uNameHash, rPending.aData, rPending.uSize);
+    }
+    rPending = g_aPendingMaterialProperties[--g_uPendingMaterialPropertyCount];
+  }
+}
+
 static bool ProcessCreateMaterial(LinearAllocator* _pAllocator, const MaterialCreateRequest* _pRequest)
 {
   RenderStateInfo oRSInfo = _pRequest->oRenderStateInfo;
   oRSInfo.m_uMeshConstantSize = sizeof(MeshConstants);
 
-  // Properties start zeroed until the update thread sets them
+  // Properties start zeroed, except those set while it was loading
   Material* pMaterial = CreateMaterial(_pAllocator, oRSInfo);
   if (!pMaterial)
   {
@@ -411,7 +484,31 @@ static bool ProcessCreateMaterial(LinearAllocator* _pAllocator, const MaterialCr
   }
 
   g_dctMaterials[_pRequest->hHandle] = pMaterial;
+  FlushPendingMaterialProperties(_pRequest->hHandle, pMaterial);
   return true;
+}
+
+// From now on the handle draws with the error mesh/material
+static void UseErrorResource(ResourceHandle _hHandle, ResourceType _eType)
+{
+  switch (_eType)
+  {
+    case ResourceType::MESH:
+      if (g_oErrorMesh.pApiMesh)
+      {
+        g_dctMeshes[_hHandle] = g_oErrorMesh;
+      }
+      break;
+    case ResourceType::MATERIAL:
+      FlushPendingMaterialProperties(_hHandle, nullptr);
+      if (g_pErrorMaterial)
+      {
+        g_dctMaterials[_hHandle] = g_pErrorMaterial;
+      }
+      break;
+    default:
+      break;
+  }
 }
 
 // Resources are created in _pAllocator (the render thread's scene arena).
@@ -420,18 +517,27 @@ static void ProcessResourceCreateRequests(LinearAllocator* _pAllocator, const Cr
 {
   bool bSucceeded = false;
 
-  switch (_pRequest->eType)
+  // A load failure was already logged by the loader
+  if (!_pRequest->bLoadFailed)
   {
-    case ResourceType::MESH:
-      bSucceeded = ProcessCreateMesh(_pAllocator, static_cast<const MeshCreateRequest*>(_pRequest));
-      break;
-    case ResourceType::MATERIAL:
-      bSucceeded = ProcessCreateMaterial(_pAllocator, static_cast<const MaterialCreateRequest*>(_pRequest));
-      break;
-    default:
-      // TODO: Handle other resource types (e.g., TEXTURE)
-      ASSERT_MSG_FORMAT(false, "Resource %u: unhandled resource type %d", _pRequest->hHandle, static_cast<int>(_pRequest->eType));
-      break;
+    switch (_pRequest->eType)
+    {
+      case ResourceType::MESH:
+        bSucceeded = ProcessCreateMesh(_pAllocator, static_cast<const MeshCreateRequest*>(_pRequest));
+        break;
+      case ResourceType::MATERIAL:
+        bSucceeded = ProcessCreateMaterial(_pAllocator, static_cast<const MaterialCreateRequest*>(_pRequest));
+        break;
+      default:
+        // TODO: Handle other resource types (e.g., TEXTURE)
+        ASSERT_MSG_FORMAT(false, "Resource %u: unhandled resource type %d", _pRequest->hHandle, static_cast<int>(_pRequest->eType));
+        break;
+    }
+
+    if (!bSucceeded)
+    {
+      LogError("Resource %u: creation failed", _pRequest->hHandle);
+    }
   }
 
   if (bSucceeded)
@@ -440,7 +546,7 @@ static void ProcessResourceCreateRequests(LinearAllocator* _pAllocator, const Cr
   }
   else
   {
-    LogError("Resource %u: creation failed", _pRequest->hHandle);
+    UseErrorResource(_pRequest->hHandle, _pRequest->eType);
     ResourceFailedCallback(_pRequest->hHandle);
   }
 }
@@ -547,8 +653,16 @@ void ProcessMailbox(Mailbox* _pMailbox)
       auto it = g_dctMaterials.find(pMsg->hMaterial);
       if (it != g_dctMaterials.end())
       {
-        // Unknown names are ignored: not every shader declares every property
-        SetMaterialProperty(it->second, pMsg->uNameHash, pMsg->aData, pMsg->uSize);
+        // Unknown names are ignored: not every shader declares every property.
+        // The error material is shared by every failed material, it never takes properties.
+        if (it->second != g_pErrorMaterial)
+        {
+          SetMaterialProperty(it->second, pMsg->uNameHash, pMsg->aData, pMsg->uSize);
+        }
+      }
+      else if (GetResourceState(pMsg->hMaterial) == ResourceState::LOADING)
+      {
+        StorePendingMaterialProperty(*pMsg);
       }
     }
     break;
@@ -633,23 +747,82 @@ void RequestRenderThreadExit()
   g_oRenderCV.notify_all();
 }
 
+static void CreateErrorResources(LinearAllocator* _pAllocator)
+{
+  static const Vertex s_aQuadVertices[4] = {
+    { { -0.25f, -0.25f, 0.f } },
+    { {  0.25f, -0.25f, 0.f } },
+    { {  0.25f,  0.25f, 0.f } },
+    { { -0.25f,  0.25f, 0.f } },
+  };
+  static const uint16_t s_aQuadIndices[6] = { 0, 1, 2, 0, 2, 3 };
+
+  g_oErrorMesh.pApiMesh = api::CreateMesh(_pAllocator, s_aQuadVertices, sizeof(s_aQuadVertices),
+    s_aQuadIndices, sizeof(s_aQuadIndices), sizeof(MeshConstants));
+  g_oErrorMesh.uIndexCount = 6u;
+  if (!g_oErrorMesh.pApiMesh)
+  {
+    LogError("Couldn't create the error mesh: failed meshes won't be drawn");
+  }
+
+  RenderStateInfo oRSInfo = {};
+  oRSInfo.m_sVSFilename = ERROR_VS_FILENAME;
+  oRSInfo.m_sPSFilename = ERROR_PS_FILENAME;
+  oRSInfo.m_bDepthWrite = false;
+  oRSInfo.m_bDepthRead = false;
+  oRSInfo.m_eCullMode = CullMode::NONE;
+  oRSInfo.m_eDepthCompareOp = DepthCompareOp::ALWAYS;
+  oRSInfo.m_uMeshConstantSize = sizeof(MeshConstants);
+
+  g_pErrorMaterial = CreateMaterial(_pAllocator, oRSInfo);
+  if (!g_pErrorMaterial)
+  {
+    LogError("Couldn't create the error material: failed materials won't be drawn");
+  }
+}
+
+static void DestroyErrorResources()
+{
+  if (g_oErrorMesh.pApiMesh)
+  {
+    api::DestroyMesh(g_oErrorMesh.pApiMesh);
+  }
+  g_oErrorMesh = {};
+
+  if (g_pErrorMaterial)
+  {
+    DestroyMaterial(g_pErrorMaterial);
+    g_pErrorMaterial = nullptr;
+  }
+}
+
 // Render thread owns every GPU resource it created, so it destroys them before exiting.
 // Requests still in the create ring are just dropped: the ring memory belongs to the main thread.
 static void DestroyRenderResources(ThreadArenas* _pArenas)
 {
+  // Failed handles share the error resources, destroyed once below
   for (auto& oPair : g_dctMeshes)
   {
-    api::DestroyMesh(oPair.second.pApiMesh);
+    if (oPair.second.pApiMesh != g_oErrorMesh.pApiMesh)
+    {
+      api::DestroyMesh(oPair.second.pApiMesh);
+    }
   }
   g_dctMeshes.clear();
 
   for (auto& oPair : g_dctMaterials)
   {
-    DestroyMaterial(oPair.second);
+    if (oPair.second != g_pErrorMaterial)
+    {
+      DestroyMaterial(oPair.second);
+    }
   }
   g_dctMaterials.clear();
 
   g_dctRenderObjects.clear();
+  g_uPendingMaterialPropertyCount = 0u;
+
+  DestroyErrorResources();
 
   // Every object living in the scene arena has been destroyed above
   _pArenas->oScene.Reset();
@@ -658,6 +831,8 @@ static void DestroyRenderResources(ThreadArenas* _pArenas)
 void RenderThreadFnc()
 {
   ThreadArenas* pArenas = CreateThreadArenas(RENDER_THREAD_ARENAS_CONFIG);
+
+  CreateErrorResources(&pArenas->oGlobal);
 
   while (true)
   {

@@ -21,4 +21,7 @@ add_custom_command(TARGET GamePrototype POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${CMAKE_CURRENT_SOURCE_DIR}/assets"
     "$<TARGET_FILE_DIR:GamePrototype>/assets"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${PROJECT_SOURCE_DIR}/Engine/assets"
+    "$<TARGET_FILE_DIR:GamePrototype>/assets/engine"
   COMMENT "Copying assets")
