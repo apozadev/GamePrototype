@@ -6,31 +6,35 @@
 
 #include "Renderer.h"
 #include "ResourceLoader.h"
+#include "Memory/ThreadArenas.h"
 
 //-----------------------------------------------------------------------------
 
+static LoadGroup* s_pSceneGroup = nullptr;
 static ResourceHandle s_hTriangleMesh = INVALID_RESOURCE_HANDLE;
 static ResourceHandle s_hTriangleMaterial = INVALID_RESOURCE_HANDLE;
-static RenderObjectHandle s_hTriangle = 0;
+static render::ObjectHandle s_hTriangle = 0;
 
 static float s_fTime = 0.f;
 static bool s_bCycleColor = true;
 
 //-----------------------------------------------------------------------------
 
-void Game_Init(ThreadArenas* /*_pArenas*/)
+void Game_Init(ThreadArenas* _pArenas)
 {
+  s_pSceneGroup = CreateLoadGroup(&_pArenas->oScene, 16u);
+
   // Relative to the executable: the platform layer sets the working directory,
   // and the build copies GamePrototype/assets next to the exe.
   MeshLoadRequestInfo oMeshInfo = {};
   oMeshInfo.pFilename = "assets/models/triangle.obj";
-  s_hTriangleMesh = LoadResourceAsync(oMeshInfo);
+  s_hTriangleMesh = LoadResourceAsync(s_pSceneGroup, oMeshInfo);
 
   MaterialLoadRequestInfo oMaterialInfo = {};
   oMaterialInfo.pVSFilename = "assets/shaders/triangleV.cso";
   oMaterialInfo.pPSFilename = "assets/shaders/triangleP.cso";
   oMaterialInfo.bBlendEnabled = false;
-  s_hTriangleMaterial = LoadResourceAsync(oMaterialInfo);
+  s_hTriangleMaterial = LoadResourceAsync(s_pSceneGroup, oMaterialInfo);
 }
 
 void Game_Update(ThreadArenas* /*_pArenas*/, MailboxHandle _hMailbox, float _fDeltaTime)
@@ -48,9 +52,9 @@ void Game_Update(ThreadArenas* /*_pArenas*/, MailboxHandle _hMailbox, float _fDe
   // Retried next frame if the mailbox was full. Drawn as soon as its resources are created.
   if (s_hTriangle == 0)
   {
-    s_hTriangle = CreateRenderObject(_hMailbox);
-    SetRenderObjectMesh(_hMailbox, s_hTriangle, s_hTriangleMesh);
-    SetRenderObjectMaterial(_hMailbox, s_hTriangle, s_hTriangleMaterial);
+    s_hTriangle = render::CreateRenderObject(_hMailbox);
+    render::SetRenderObjectMesh(_hMailbox, s_hTriangle, s_hTriangleMesh);
+    render::SetRenderObjectMaterial(_hMailbox, s_hTriangle, s_hTriangleMaterial);
   }
 
   // Cycle through hues, one RGB channel 120 degrees apart from the next
@@ -61,7 +65,7 @@ void Game_Update(ThreadArenas* /*_pArenas*/, MailboxHandle _hMailbox, float _fDe
     0.5f + 0.5f * sinf(s_fTime + 2.f * fPhase),
     1.f
   };
-  SetMaterialProperty(_hMailbox, s_hTriangleMaterial, "color", vColor, sizeof(vColor));
+  render::SetMaterialProperty(_hMailbox, s_hTriangleMaterial, "color", vColor, sizeof(vColor));
 }
 
 void Game_Shutdown(ThreadArenas* /*_pArenas*/)

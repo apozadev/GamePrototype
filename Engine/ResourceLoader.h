@@ -1,32 +1,8 @@
 #pragma once
 
-#include "Vertex.h"
-#include <cstddef>
-#include <inttypes.h>
+#include "ResourceRegistry.h"
 
 struct LinearAllocator;
-
-typedef uint32_t ResourceHandle;
-
-constexpr ResourceHandle INVALID_RESOURCE_HANDLE = 0;
-
-enum class ResourceType
-{
-  INVALID,
-  MESH,
-  MATERIAL,
-  TEXTURE,
-  COUNT
-};
-
-enum class ResourceState
-{
-  INVALID,
-  LOADING,
-  READY,
-  FAILED,
-  COUNT
-};
 
 // Filenames are copied into the request, they don't need to outlive the call.
 struct MeshLoadRequestInfo
@@ -43,23 +19,45 @@ struct MaterialLoadRequestInfo
   bool bBlendEnabled;
 };
 
-// Allocates the load request ring from _pAllocator, which must outlive the loader thread.
+// Tracks the loading of a set of resources. It doesn't own them: resources live until UnloadScene.
+// Plain data in the caller's allocator, update thread only.
+struct LoadGroup;
+
+enum class LoadGroupState
+{
+  LOADING,
+  READY,  // Every resource is READY
+  FAILED, // Every resource finished, at least one FAILED (it draws with the error mesh/material)
+};
+
+struct LoadGroupStatus
+{
+  LoadGroupState eState;
+  uint32_t uReady;
+  uint32_t uFailed; // Includes resources no longer valid (unloaded with the scene)
+  uint32_t uTotal;
+};
+
+// Allocates the load queue from _pAllocator, which must outlive the loader thread.
 // Call once from the main thread before starting the loader thread.
 void InitResourceLoader(LinearAllocator* _pAllocator);
 
-// Update thread only (the request ring has a single producer).
-// Blocks while the request ring is full. A request too big to ever fit in the ring
-// is a fatal error (increase LOAD_REQUEST_RING_SIZE).
-ResourceHandle LoadResourceAsync(const MeshLoadRequestInfo& _oInfo);
-ResourceHandle LoadResourceAsync(const MaterialLoadRequestInfo& _oInfo);
+// Room for _uCapacity resources. Lives as long as _pAllocator's memory (usually the scene arena).
+LoadGroup* CreateLoadGroup(LinearAllocator* _pAllocator, uint32_t _uCapacity);
 
-ResourceState GetResourceState(ResourceHandle _hHandle);
+// Update thread only (the load queue has a single producer).
+// Blocks while the load queue is full. A request too big to ever fit in the queue, or a
+// full group, is a fatal error (increase LOAD_QUEUE_SIZE or the group capacity).
+ResourceHandle LoadResourceAsync(LoadGroup* _pGroup, const MeshLoadRequestInfo& _oInfo);
+ResourceHandle LoadResourceAsync(LoadGroup* _pGroup, const MaterialLoadRequestInfo& _oInfo);
 
-// Called by the thread that finishes the resource (render thread for GPU resources)
-void ResourceCompletedCallback(ResourceHandle _hHandle);
+// Update thread only. Lock-free: one atomic read per resource in the group.
+LoadGroupStatus GetLoadGroupStatus(const LoadGroup* _pGroup);
 
-// Moves the resource to FAILED. It never becomes READY; the game should stop waiting on it.
-void ResourceFailedCallback(ResourceHandle _hHandle);
+// Update thread only. Unloads every resource requested before this call; those requested after
+// belong to the next scene. Their handles become INVALID once the render thread gets to it, and
+// render objects using them stop drawing. Load groups pointing at them must be dropped too.
+void UnloadScene();
 
 void WorkerThreadProcessLoadRequests();
 

@@ -19,8 +19,8 @@
 #include "Mailbox.h"
 #include "Memory/LinearAllocator.h"
 #include "Memory/MemoryUtil.h"
-#include "Memory/RingAllocator.h"
 #include "Memory/ThreadArenas.h"
+#include "MessageQueue.h"
 
 struct MeshConstants
 {
@@ -45,33 +45,31 @@ enum class MailboxMessageType : uint32_t
 struct CreateRenderObjectMessage
 {
   static constexpr MailboxMessageType TYPE = MailboxMessageType::CREATE_RENDER_OBJECT;
-  RenderObjectHandle hRenderObject;
+  render::ObjectHandle hRenderObject;
 };
 
 struct DestroyRenderObjectMessage
 {
   static constexpr MailboxMessageType TYPE = MailboxMessageType::DESTROY_RENDER_OBJECT;
-  RenderObjectHandle hRenderObject;
+  render::ObjectHandle hRenderObject;
 };
 
 struct SetRenderObjectMeshMessage
 {
   static constexpr MailboxMessageType TYPE = MailboxMessageType::SET_RENDER_OBJECT_MESH;
-  RenderObjectHandle hRenderObject;
+  render::ObjectHandle hRenderObject;
   ResourceHandle hMesh;
 };
 
 struct SetRenderObjectMaterialMessage
 {
   static constexpr MailboxMessageType TYPE = MailboxMessageType::SET_RENDER_OBJECT_MATERIAL;
-  RenderObjectHandle hRenderObject;
+  render::ObjectHandle hRenderObject;
   ResourceHandle hMaterial;
 };
 
-// Biggest property that fits in one message: a float4x4
 static constexpr uint32_t MAX_MATERIAL_PROPERTY_SIZE = 64u;
 
-// TODO: Fixed-size payload, a scalar still costs 64 bytes. Variable-size messages would fix it.
 struct SetMaterialPropertyMessage
 {
   static constexpr MailboxMessageType TYPE = MailboxMessageType::SET_MATERIAL_PROPERTY;
@@ -81,11 +79,51 @@ struct SetMaterialPropertyMessage
   uint8_t aData[MAX_MATERIAL_PROPERTY_SIZE];
 };
 
-// Properties set while their material is still loading, applied once it is created.
-// Only the latest value per (material, name) is kept. Render thread only.
-static constexpr uint32_t MAX_PENDING_MATERIAL_PROPERTIES = 256u;
-static SetMaterialPropertyMessage g_aPendingMaterialProperties[MAX_PENDING_MATERIAL_PROPERTIES];
-static uint32_t g_uPendingMaterialPropertyCount = 0u;
+//-----------------------------------------------------------------------------
+// Resource messages (loader thread -> render thread), sent through g_oCreateQueue
+//-----------------------------------------------------------------------------
+
+enum class ResourceMessageType : uint32_t
+{
+  INVALID,
+  CREATE_MESH,
+  CREATE_MATERIAL,
+  RESOURCE_FAILED,
+  UNLOAD_SCENE_RESOURCES,
+  COUNT
+};
+
+// The data pointers point into the message's own extra bytes
+struct CreateMeshMessage
+{
+  static constexpr ResourceMessageType TYPE = ResourceMessageType::CREATE_MESH;
+  ResourceHandle hHandle;
+  const void* pVertexData;
+  size_t zVertexDataSize;
+  const void* pIndexData;
+  size_t zIndexDataSize;
+};
+
+// The filename views point into the message's own extra bytes
+struct CreateMaterialMessage
+{
+  static constexpr ResourceMessageType TYPE = ResourceMessageType::CREATE_MATERIAL;
+  ResourceHandle hHandle;
+  RenderStateInfo oRenderStateInfo;
+};
+
+struct ResourceFailedMessage
+{
+  static constexpr ResourceMessageType TYPE = ResourceMessageType::RESOURCE_FAILED;
+  ResourceHandle hHandle;
+  ResourceType eResourceType;
+};
+
+// Everything queued before it belongs to the scene being unloaded
+struct UnloadSceneResourcesMessage
+{
+  static constexpr ResourceMessageType TYPE = ResourceMessageType::UNLOAD_SCENE_RESOURCES;
+};
 
 //-----------------------------------------------------------------------------
 
@@ -105,19 +143,11 @@ struct RenderObject
 std::mutex g_oRenderMutex;
 std::condition_variable g_oRenderCV;
 
-// Create requests (loader thread -> render thread). Each one is a single ring
-// allocation holding the request and copies of the data it points to; the
-// render thread frees it once the resource is created (or failed).
-static constexpr size_t CREATE_REQUEST_RING_SIZE = 8u * 1024u * 1024u;
-
-// Enough for any payload (vertex data, strings) and request struct
-static constexpr size_t CREATE_REQUEST_ALIGNMENT = 16u;
-
-// Guarded by g_oRenderMutex
-static RingAllocator* g_pCreateRequestRing = nullptr;
-
-// Loader thread waits here for room in the create request ring
-static std::condition_variable g_oCreateRingSpaceCV;
+// Resource messages (loader thread -> render thread). Each one carries copies of the data it
+// points to; the render thread frees it once the resource is created (or failed).
+// Shares g_oRenderMutex/g_oRenderCV so the render thread waits on frames and resources at once.
+static constexpr size_t CREATE_QUEUE_SIZE = 8u * 1024u * 1024u;
+static MessageQueue g_oCreateQueue;
 
 // Guarded by g_oRenderMutex
 static bool g_bRenderThreadExit = false;
@@ -131,13 +161,21 @@ static constexpr ThreadArenasConfig RENDER_THREAD_ARENAS_CONFIG = {
 // Set by the window thread, consumed by the render thread
 static std::atomic<bool> g_bResizePending = false;
 
+// GPU side of a resource, at its handle's slot index
+struct RenderResource
+{
+  ResourceHandle hHandle = INVALID_RESOURCE_HANDLE; // Set once created (or failed): lookups compare it
+  ResourceType eType = ResourceType::INVALID;
+  Mesh oMesh;
+  Material* pMaterial = nullptr;
+};
+
 // Render thread only
-std::unordered_map<ResourceHandle, Mesh> g_dctMeshes;
-std::unordered_map<ResourceHandle, Material*> g_dctMaterials;
-std::unordered_map<RenderObjectHandle, RenderObject> g_dctRenderObjects;
+static RenderResource g_aRenderResources[MAX_RESOURCES];
+std::unordered_map<render::ObjectHandle, RenderObject> g_dctRenderObjects;
 
 // Drawn in place of failed resources. Created in the render thread's global arena;
-// a failed handle maps to them in g_dctMeshes/g_dctMaterials. Null if they couldn't be created.
+// a failed handle's RenderResource points to them. Null if they couldn't be created.
 static Mesh g_oErrorMesh = {};
 static Material* g_pErrorMaterial = nullptr;
 
@@ -162,10 +200,6 @@ static Mailbox g_oMailbox1 = { g_aMailboxMemory1, 0, MAILBOX_CAPACITY, MAILBOX_I
 static MailboxHandle g_hNextWriteMailbox = 0; // Update thread only
 static MailboxHandle g_hNextReadMailbox = 0;  // Render thread only
 
-// ImGui draw data travels next to each mailbox, in its own arena: it is too big for the
-// message buffer. Owned like the mailbox itself: by the update thread while RECORDING
-// (reset, then filled by SubmitImGuiDrawData), by the render thread while PROCESSING.
-// The mailbox only goes back to IDLE once its frame is drawn.
 static constexpr size_t IMGUI_DRAW_DATA_ARENA_SIZE = 2u * 1024u * 1024u;
 
 static LinearAllocator* g_aImGuiArenas[2] = {};
@@ -181,16 +215,16 @@ Mailbox& GetMailbox(MailboxHandle _hMailbox)
 // Update thread API
 //-----------------------------------------------------------------------------
 
-static RenderObjectHandle GetNextHandle()
+static render::ObjectHandle GetNextHandle()
 {
   // 0 is reserved as "no render object"
-  static std::atomic<RenderObjectHandle> s_hNextHandle = 1;
+  static std::atomic<render::ObjectHandle> s_hNextHandle = 1;
   return s_hNextHandle.fetch_add(1, std::memory_order_relaxed);
 }
 
 // Update thread only. The handle is valid immediately; the render thread
 // creates the object when it processes this frame's mailbox.
-RenderObjectHandle CreateRenderObject(MailboxHandle _hMailbox)
+render::ObjectHandle render::CreateRenderObject(MailboxHandle _hMailbox)
 {
   CreateRenderObjectMessage oMsg = {};
   oMsg.hRenderObject = GetNextHandle();
@@ -201,14 +235,14 @@ RenderObjectHandle CreateRenderObject(MailboxHandle _hMailbox)
   return oMsg.hRenderObject;
 }
 
-void DestroyRenderObject(MailboxHandle _hMailbox, RenderObjectHandle _hRenderObj)
+void render::DestroyRenderObject(MailboxHandle _hMailbox, render::ObjectHandle _hRenderObj)
 {
   DestroyRenderObjectMessage oMsg = {};
   oMsg.hRenderObject = _hRenderObj;
   AddMessageToMailbox(_hMailbox, &oMsg);
 }
 
-void SetRenderObjectMesh(MailboxHandle _hMailbox, RenderObjectHandle _hRenderObj, ResourceHandle _hMesh)
+void render::SetRenderObjectMesh(MailboxHandle _hMailbox, render::ObjectHandle _hRenderObj, ResourceHandle _hMesh)
 {
   SetRenderObjectMeshMessage oMsg = {};
   oMsg.hRenderObject = _hRenderObj;
@@ -216,7 +250,7 @@ void SetRenderObjectMesh(MailboxHandle _hMailbox, RenderObjectHandle _hRenderObj
   AddMessageToMailbox(_hMailbox, &oMsg);
 }
 
-void SetRenderObjectMaterial(MailboxHandle _hMailbox, RenderObjectHandle _hRenderObj, ResourceHandle _hMaterial)
+void render::SetRenderObjectMaterial(MailboxHandle _hMailbox, render::ObjectHandle _hRenderObj, ResourceHandle _hMaterial)
 {
   SetRenderObjectMaterialMessage oMsg = {};
   oMsg.hRenderObject = _hRenderObj;
@@ -224,7 +258,7 @@ void SetRenderObjectMaterial(MailboxHandle _hMailbox, RenderObjectHandle _hRende
   AddMessageToMailbox(_hMailbox, &oMsg);
 }
 
-void SetMaterialProperty(MailboxHandle _hMailbox, ResourceHandle _hMaterial, const char* _sName, const void* _pData, uint32_t _uSize)
+void render::SetMaterialProperty(MailboxHandle _hMailbox, ResourceHandle _hMaterial, const char* _sName, const void* _pData, uint32_t _uSize)
 {
   ASSERT_MSG_FORMAT(_uSize <= MAX_MATERIAL_PROPERTY_SIZE, "Material property '%s' is %u bytes, max is %u", _sName, _uSize, MAX_MATERIAL_PROPERTY_SIZE);
 
@@ -236,7 +270,7 @@ void SetMaterialProperty(MailboxHandle _hMailbox, ResourceHandle _hMaterial, con
   AddMessageToMailbox(_hMailbox, &oMsg);
 }
 
-void SubmitImGuiDrawData(MailboxHandle _hMailbox, const ImDrawData* _pDrawData)
+void render::SubmitImGuiDrawData(MailboxHandle _hMailbox, const ImDrawData* _pDrawData)
 {
   ASSERT_MSG(g_aImGuiDrawData[_hMailbox] == nullptr, "SubmitImGuiDrawData called twice for the same mailbox");
 
@@ -254,7 +288,7 @@ void SubmitImGuiDrawData(MailboxHandle _hMailbox, const ImDrawData* _pDrawData)
   g_aImGuiDrawData[_hMailbox] = pCopy;
 }
 
-void RequestWindowResize()
+void render::RequestWindowResize()
 {
   g_bResizePending = true;
 }
@@ -263,11 +297,9 @@ void RequestWindowResize()
 // Resource creation requests (any thread -> render thread)
 //-----------------------------------------------------------------------------
 
-void InitRenderer(LinearAllocator* _pAllocator)
+void render::InitRenderer(LinearAllocator* _pAllocator)
 {
-  char* pRingMemory = static_cast<char*>(_pAllocator->Allocate(CREATE_REQUEST_RING_SIZE, CREATE_REQUEST_ALIGNMENT));
-  FATAL_ASSERT_MSG_FORMAT(pRingMemory, "Not enough memory for the create request ring (%zu bytes)", CREATE_REQUEST_RING_SIZE);
-  RingAllocator* pRing = NewObject<RingAllocator>(_pAllocator, pRingMemory, CREATE_REQUEST_RING_SIZE);
+  InitMessageQueue(&g_oCreateQueue, _pAllocator, CREATE_QUEUE_SIZE, &g_oRenderMutex, &g_oRenderCV);
 
   for (LinearAllocator*& rpArena : g_aImGuiArenas)
   {
@@ -275,88 +307,57 @@ void InitRenderer(LinearAllocator* _pAllocator)
     FATAL_ASSERT_MSG_FORMAT(pArenaMemory, "Not enough memory for the ImGui draw data arenas (%zu bytes each)", IMGUI_DRAW_DATA_ARENA_SIZE);
     rpArena = NewObject<LinearAllocator>(_pAllocator, pArenaMemory, IMGUI_DRAW_DATA_ARENA_SIZE);
   }
-
-  std::lock_guard<std::mutex> lock(g_oRenderMutex);
-  g_pCreateRequestRing = pRing;
 }
 
-// Reserves room for one request, waiting for the render thread to free some if needed.
-// Returns nullptr (logged) if it can never fit. Pair with PublishCreateRequest.
-static char* AllocateCreateRequest(size_t _zSize)
-{
-  std::unique_lock<std::mutex> lock(g_oRenderMutex);
-
-  FATAL_ASSERT_MSG(g_pCreateRequestRing, "InitRenderer was not called");
-  if (!g_pCreateRequestRing->Fits(_zSize, CREATE_REQUEST_ALIGNMENT))
-  {
-    LogError("Create request of %zu bytes can never fit in the create request ring (%zu bytes): increase CREATE_REQUEST_RING_SIZE",
-      _zSize, CREATE_REQUEST_RING_SIZE);
-    return nullptr;
-  }
-
-  void* pMemory = nullptr;
-  while ((pMemory = g_pCreateRequestRing->Allocate(_zSize, CREATE_REQUEST_ALIGNMENT)) == nullptr)
-  {
-    g_oCreateRingSpaceCV.wait(lock);
-  }
-
-  return static_cast<char*>(pMemory);
-}
-
-static void PublishCreateRequest()
-{
-  {
-    std::lock_guard<std::mutex> lock(g_oRenderMutex);
-    g_pCreateRequestRing->Publish();
-  }
-  g_oRenderCV.notify_all();
-}
-
-bool RequestCreateMesh(const MeshCreateRequest& _oRequest)
+bool render::RequestCreateMesh(ResourceHandle _hHandle, const void* _pVertexData, size_t _zVertexDataSize, const void* _pIndexData, size_t _zIndexDataSize)
 {
   PackedLayout oLayout;
-  oLayout.Add(sizeof(MeshCreateRequest), alignof(MeshCreateRequest));
-  const size_t zVertexOffset = oLayout.Add(_oRequest.zVertexDataSize, CREATE_REQUEST_ALIGNMENT);
-  const size_t zIndexOffset = oLayout.Add(_oRequest.zIndexDataSize, CREATE_REQUEST_ALIGNMENT);
+  const size_t zVertexOffset = oLayout.Add(_zVertexDataSize, MESSAGE_EXTRA_ALIGNMENT);
+  const size_t zIndexOffset = oLayout.Add(_zIndexDataSize, MESSAGE_EXTRA_ALIGNMENT);
 
-  char* pMemory = AllocateCreateRequest(oLayout.zSize);
-  if (!pMemory)
+  char* pExtra = nullptr;
+  CreateMeshMessage* pMsg = BeginQueueMessage<CreateMeshMessage>(&g_oCreateQueue, oLayout.zSize, &pExtra);
+  if (!pMsg)
   {
     return false;
   }
 
-  if (_oRequest.zVertexDataSize > 0u)
+  if (_zVertexDataSize > 0u)
   {
-    memcpy(pMemory + zVertexOffset, _oRequest.pVertexData, _oRequest.zVertexDataSize);
+    memcpy(pExtra + zVertexOffset, _pVertexData, _zVertexDataSize);
   }
-  if (_oRequest.zIndexDataSize > 0u)
+  if (_zIndexDataSize > 0u)
   {
-    memcpy(pMemory + zIndexOffset, _oRequest.pIndexData, _oRequest.zIndexDataSize);
+    memcpy(pExtra + zIndexOffset, _pIndexData, _zIndexDataSize);
   }
 
-  MeshCreateRequest* pRequest = new (pMemory) MeshCreateRequest(_oRequest);
-  pRequest->pVertexData = pMemory + zVertexOffset;
-  pRequest->pIndexData = pMemory + zIndexOffset;
+  pMsg->hHandle = _hHandle;
+  pMsg->pVertexData = pExtra + zVertexOffset;
+  pMsg->pIndexData = pExtra + zIndexOffset;
+  pMsg->zVertexDataSize = _zVertexDataSize;
+  pMsg->zIndexDataSize = _zIndexDataSize;
 
-  PublishCreateRequest();
+  EndQueueMessage(&g_oCreateQueue);
   return true;
 }
 
-void RequestResourceFailed(ResourceHandle _hHandle, ResourceType _eType)
+void render::RequestResourceFailed(ResourceHandle _hHandle, ResourceType _eType)
 {
-  char* pMemory = AllocateCreateRequest(sizeof(CreateRequestBase));
-  if (!pMemory)
-  {
-    ResourceFailedCallback(_hHandle);
-    return;
-  }
+  ResourceFailedMessage* pMsg = BeginQueueMessage<ResourceFailedMessage>(&g_oCreateQueue);
+  // Without it the handle would stay LOADING forever
+  FATAL_ASSERT_MSG(pMsg, "Resource failed message doesn't fit in the create queue");
 
-  CreateRequestBase* pRequest = new (pMemory) CreateRequestBase();
-  pRequest->hHandle = _hHandle;
-  pRequest->eType = _eType;
-  pRequest->bLoadFailed = true;
+  pMsg->hHandle = _hHandle;
+  pMsg->eResourceType = _eType;
 
-  PublishCreateRequest();
+  EndQueueMessage(&g_oCreateQueue);
+}
+
+void render::RequestUnloadScene()
+{
+  const bool bQueued = BeginQueueMessage<UnloadSceneResourcesMessage>(&g_oCreateQueue) != nullptr;
+  FATAL_ASSERT_MSG(bQueued, "Unload scene message doesn't fit in the create queue");
+  EndQueueMessage(&g_oCreateQueue);
 }
 
 // Copies _sString null-terminated to _pDest (sized with _sString.size() + 1) and points the view at the copy
@@ -376,33 +377,31 @@ static size_t GetStringViewStorageSize(std::string_view _sString)
   return _sString.empty() ? 0u : _sString.size() + 1u;
 }
 
-bool RequestCreateMaterial(const MaterialCreateRequest& _oRequest)
+bool render::RequestCreateMaterial(ResourceHandle _hHandle, const RenderStateInfo& _oRenderStateInfo)
 {
-  const RenderStateInfo& rInfo = _oRequest.oRenderStateInfo;
-
   PackedLayout oLayout;
-  oLayout.Add(sizeof(MaterialCreateRequest), alignof(MaterialCreateRequest));
-  const size_t zVSOffset = oLayout.Add(GetStringViewStorageSize(rInfo.m_sVSFilename), 1u);
-  const size_t zPSOffset = oLayout.Add(GetStringViewStorageSize(rInfo.m_sPSFilename), 1u);
-  const size_t zGSOffset = oLayout.Add(GetStringViewStorageSize(rInfo.m_sGSFilename), 1u);
+  const size_t zVSOffset = oLayout.Add(GetStringViewStorageSize(_oRenderStateInfo.m_sVSFilename), 1u);
+  const size_t zPSOffset = oLayout.Add(GetStringViewStorageSize(_oRenderStateInfo.m_sPSFilename), 1u);
+  const size_t zGSOffset = oLayout.Add(GetStringViewStorageSize(_oRenderStateInfo.m_sGSFilename), 1u);
 
-  char* pMemory = AllocateCreateRequest(oLayout.zSize);
-  if (!pMemory)
+  char* pExtra = nullptr;
+  CreateMaterialMessage* pMsg = BeginQueueMessage<CreateMaterialMessage>(&g_oCreateQueue, oLayout.zSize, &pExtra);
+  if (!pMsg)
   {
     return false;
   }
 
-  MaterialCreateRequest* pRequest = new (pMemory) MaterialCreateRequest(_oRequest);
-  RenderStateInfo& rCopiedInfo = pRequest->oRenderStateInfo;
-  rCopiedInfo.m_sVSFilename = CopyStringView(pMemory + zVSOffset, rInfo.m_sVSFilename);
-  rCopiedInfo.m_sPSFilename = CopyStringView(pMemory + zPSOffset, rInfo.m_sPSFilename);
-  rCopiedInfo.m_sGSFilename = CopyStringView(pMemory + zGSOffset, rInfo.m_sGSFilename);
+  pMsg->hHandle = _hHandle;
+  pMsg->oRenderStateInfo = _oRenderStateInfo;
+  pMsg->oRenderStateInfo.m_sVSFilename = CopyStringView(pExtra + zVSOffset, _oRenderStateInfo.m_sVSFilename);
+  pMsg->oRenderStateInfo.m_sPSFilename = CopyStringView(pExtra + zPSOffset, _oRenderStateInfo.m_sPSFilename);
+  pMsg->oRenderStateInfo.m_sGSFilename = CopyStringView(pExtra + zGSOffset, _oRenderStateInfo.m_sGSFilename);
 
-  PublishCreateRequest();
+  EndQueueMessage(&g_oCreateQueue);
   return true;
 }
 
-static bool ProcessCreateMesh(LinearAllocator* _pAllocator, const MeshCreateRequest* _pRequest)
+static bool ProcessCreateMesh(LinearAllocator* _pAllocator, const CreateMeshMessage* _pRequest)
 {
   // The backends bind the index buffer as 16-bit
   if (_pRequest->zIndexDataSize % sizeof(uint16_t) != 0u)
@@ -424,130 +423,136 @@ static bool ProcessCreateMesh(LinearAllocator* _pAllocator, const MeshCreateRequ
 
   oMesh.uIndexCount = static_cast<uint32_t>(_pRequest->zIndexDataSize / sizeof(uint16_t));
 
-  g_dctMeshes[_pRequest->hHandle] = oMesh;
+  RenderResource& rResource = g_aRenderResources[GetResourceIndex(_pRequest->hHandle)];
+  rResource.hHandle = _pRequest->hHandle;
+  rResource.eType = ResourceType::MESH;
+  rResource.oMesh = oMesh;
 
   oRollback.Commit();
   return true;
 }
 
-static void StorePendingMaterialProperty(const SetMaterialPropertyMessage& _oMsg)
-{
-  for (uint32_t i = 0u; i < g_uPendingMaterialPropertyCount; i++)
-  {
-    SetMaterialPropertyMessage& rPending = g_aPendingMaterialProperties[i];
-    if (rPending.hMaterial == _oMsg.hMaterial && rPending.uNameHash == _oMsg.uNameHash)
-    {
-      rPending = _oMsg;
-      return;
-    }
-  }
-
-  if (g_uPendingMaterialPropertyCount == MAX_PENDING_MATERIAL_PROPERTIES)
-  {
-    LogError("Material %u: property dropped, too many properties set on loading materials. Increase MAX_PENDING_MATERIAL_PROPERTIES", _oMsg.hMaterial);
-    return;
-  }
-  g_aPendingMaterialProperties[g_uPendingMaterialPropertyCount++] = _oMsg;
-}
-
-// Applies the material's pending properties to _pMaterial (or drops them if it is null) and forgets them
-static void FlushPendingMaterialProperties(ResourceHandle _hMaterial, Material* _pMaterial)
-{
-  uint32_t i = 0u;
-  while (i < g_uPendingMaterialPropertyCount)
-  {
-    SetMaterialPropertyMessage& rPending = g_aPendingMaterialProperties[i];
-    if (rPending.hMaterial != _hMaterial)
-    {
-      i++;
-      continue;
-    }
-
-    if (_pMaterial)
-    {
-      SetMaterialProperty(_pMaterial, rPending.uNameHash, rPending.aData, rPending.uSize);
-    }
-    rPending = g_aPendingMaterialProperties[--g_uPendingMaterialPropertyCount];
-  }
-}
-
-static bool ProcessCreateMaterial(LinearAllocator* _pAllocator, const MaterialCreateRequest* _pRequest)
+static bool ProcessCreateMaterial(LinearAllocator* _pAllocator, const CreateMaterialMessage* _pRequest)
 {
   RenderStateInfo oRSInfo = _pRequest->oRenderStateInfo;
   oRSInfo.m_uMeshConstantSize = sizeof(MeshConstants);
 
-  // Properties start zeroed, except those set while it was loading
+  // Properties start zeroed until the update thread sets them
   Material* pMaterial = CreateMaterial(_pAllocator, oRSInfo);
   if (!pMaterial)
   {
     return false;
   }
 
-  g_dctMaterials[_pRequest->hHandle] = pMaterial;
-  FlushPendingMaterialProperties(_pRequest->hHandle, pMaterial);
+  RenderResource& rResource = g_aRenderResources[GetResourceIndex(_pRequest->hHandle)];
+  rResource.hHandle = _pRequest->hHandle;
+  rResource.eType = ResourceType::MATERIAL;
+  rResource.pMaterial = pMaterial;
   return true;
 }
 
 // From now on the handle draws with the error mesh/material
 static void UseErrorResource(ResourceHandle _hHandle, ResourceType _eType)
 {
-  switch (_eType)
-  {
-    case ResourceType::MESH:
-      if (g_oErrorMesh.pApiMesh)
-      {
-        g_dctMeshes[_hHandle] = g_oErrorMesh;
-      }
-      break;
-    case ResourceType::MATERIAL:
-      FlushPendingMaterialProperties(_hHandle, nullptr);
-      if (g_pErrorMaterial)
-      {
-        g_dctMaterials[_hHandle] = g_pErrorMaterial;
-      }
-      break;
-    default:
-      break;
-  }
+  RenderResource& rResource = g_aRenderResources[GetResourceIndex(_hHandle)];
+  rResource.hHandle = _hHandle;
+  rResource.eType = _eType;
+  rResource.oMesh = (_eType == ResourceType::MESH) ? g_oErrorMesh : Mesh{};
+  rResource.pMaterial = (_eType == ResourceType::MATERIAL) ? g_pErrorMaterial : nullptr;
 }
 
-// Resources are created in _pAllocator (the render thread's scene arena).
-// A bad asset (e.g. missing shader file) only fails that resource.
-static void ProcessResourceCreateRequests(LinearAllocator* _pAllocator, const CreateRequestBase* _pRequest)
+// Nullptr for stale handles, other types, and resources not created yet
+static const Mesh* FindMesh(ResourceHandle _hHandle)
 {
-  bool bSucceeded = false;
+  const RenderResource& rResource = g_aRenderResources[GetResourceIndex(_hHandle)];
+  const bool bFound = _hHandle != INVALID_RESOURCE_HANDLE && rResource.hHandle == _hHandle
+    && rResource.eType == ResourceType::MESH && rResource.oMesh.pApiMesh;
+  return bFound ? &rResource.oMesh : nullptr;
+}
 
-  // A load failure was already logged by the loader
-  if (!_pRequest->bLoadFailed)
+static Material* FindMaterial(ResourceHandle _hHandle)
+{
+  const RenderResource& rResource = g_aRenderResources[GetResourceIndex(_hHandle)];
+  const bool bFound = _hHandle != INVALID_RESOURCE_HANDLE && rResource.hHandle == _hHandle
+    && rResource.eType == ResourceType::MATERIAL;
+  return bFound ? rResource.pMaterial : nullptr;
+}
+
+// Destroys the GPU objects (unless they are the shared error ones).
+// The memory stays in the scene arena until it is reset.
+static void DestroyRenderResource(RenderResource& rResource_)
+{
+  if (rResource_.oMesh.pApiMesh && rResource_.oMesh.pApiMesh != g_oErrorMesh.pApiMesh)
   {
-    switch (_pRequest->eType)
-    {
-      case ResourceType::MESH:
-        bSucceeded = ProcessCreateMesh(_pAllocator, static_cast<const MeshCreateRequest*>(_pRequest));
-        break;
-      case ResourceType::MATERIAL:
-        bSucceeded = ProcessCreateMaterial(_pAllocator, static_cast<const MaterialCreateRequest*>(_pRequest));
-        break;
-      default:
-        // TODO: Handle other resource types (e.g., TEXTURE)
-        ASSERT_MSG_FORMAT(false, "Resource %u: unhandled resource type %d", _pRequest->hHandle, static_cast<int>(_pRequest->eType));
-        break;
-    }
+    api::DestroyMesh(rResource_.oMesh.pApiMesh);
+  }
+  if (rResource_.pMaterial && rResource_.pMaterial != g_pErrorMaterial)
+  {
+    DestroyMaterial(rResource_.pMaterial);
+  }
+  rResource_ = {};
+}
 
-    if (!bSucceeded)
+// Every resource request comes through the create queue before the unload marker that follows
+// it, so they are all created (or failed) by now: nothing of the old scene is still in flight.
+static void UnloadSceneResources(LinearAllocator* _pSceneArena)
+{
+  for (RenderResource& rResource : g_aRenderResources)
+  {
+    if (rResource.hHandle != INVALID_RESOURCE_HANDLE)
     {
-      LogError("Resource %u: creation failed", _pRequest->hHandle);
+      const ResourceHandle hHandle = rResource.hHandle;
+      DestroyRenderResource(rResource);
+      FreeResourceHandle(hHandle);
     }
   }
 
-  if (bSucceeded)
+  // Every object living in the scene arena has been destroyed above
+  _pSceneArena->Reset();
+}
+
+// Publishes the outcome of a create message to the update thread
+static void FinishCreateResource(ResourceHandle _hHandle, ResourceType _eType, bool _bSucceeded)
+{
+  if (_bSucceeded)
   {
-    ResourceCompletedCallback(_pRequest->hHandle);
+    ResourceCompletedCallback(_hHandle);
   }
   else
   {
-    UseErrorResource(_pRequest->hHandle, _pRequest->eType);
-    ResourceFailedCallback(_pRequest->hHandle);
+    UseErrorResource(_hHandle, _eType);
+    ResourceFailedCallback(_hHandle);
+  }
+}
+
+static void ProcessResourceMessage(LinearAllocator* _pAllocator, const MessageHeader* _pHeader)
+{
+  switch (static_cast<ResourceMessageType>(_pHeader->uType))
+  {
+  case CreateMeshMessage::TYPE:
+  {
+    const CreateMeshMessage* pMsg = GetQueueMessagePayload<CreateMeshMessage>(_pHeader);
+    FinishCreateResource(pMsg->hHandle, ResourceType::MESH, ProcessCreateMesh(_pAllocator, pMsg));
+  }
+  break;
+  case CreateMaterialMessage::TYPE:
+  {
+    const CreateMaterialMessage* pMsg = GetQueueMessagePayload<CreateMaterialMessage>(_pHeader);
+    FinishCreateResource(pMsg->hHandle, ResourceType::MATERIAL, ProcessCreateMaterial(_pAllocator, pMsg));
+  }
+  break;
+  case ResourceFailedMessage::TYPE:
+  {
+    const ResourceFailedMessage* pMsg = GetQueueMessagePayload<ResourceFailedMessage>(_pHeader);
+    FinishCreateResource(pMsg->hHandle, pMsg->eResourceType, false);
+  }
+  break;
+  case UnloadSceneResourcesMessage::TYPE:
+    UnloadSceneResources(_pAllocator);
+    break;
+  default:
+    ASSERT_MSG_FORMAT(false, "Unknown resource message type %u", _pHeader->uType);
+    break;
   }
 }
 
@@ -555,7 +560,7 @@ static void ProcessResourceCreateRequests(LinearAllocator* _pAllocator, const Cr
 // Mailbox handoff
 //-----------------------------------------------------------------------------
 
-MailboxHandle AcquireMailboxWrite()
+MailboxHandle render::AcquireMailboxWrite()
 {
   const MailboxHandle hHandle = g_hNextWriteMailbox;
   Mailbox& oMailbox = GetMailbox(hHandle);
@@ -579,7 +584,7 @@ MailboxHandle AcquireMailboxWrite()
   return hHandle;
 }
 
-void ReleaseMailboxWrite(MailboxHandle _hMailbox)
+void render::ReleaseMailboxWrite(MailboxHandle _hMailbox)
 {
   {
     std::lock_guard<std::mutex> lock(g_oRenderMutex);
@@ -602,7 +607,7 @@ static void ReleaseMailboxRead(MailboxHandle _hMailbox)
 // Render thread
 //-----------------------------------------------------------------------------
 
-static RenderObject* FindRenderObject(RenderObjectHandle _hRenderObj)
+static RenderObject* FindRenderObject(render::ObjectHandle _hRenderObj)
 {
   auto it = g_dctRenderObjects.find(_hRenderObj);
   return (it != g_dctRenderObjects.end()) ? &it->second : nullptr;
@@ -650,19 +655,14 @@ void ProcessMailbox(Mailbox* _pMailbox)
     case SetMaterialPropertyMessage::TYPE:
     {
       const SetMaterialPropertyMessage* pMsg = reinterpret_cast<const SetMaterialPropertyMessage*>(pCurrData);
-      auto it = g_dctMaterials.find(pMsg->hMaterial);
-      if (it != g_dctMaterials.end())
+      if (Material* pMaterial = FindMaterial(pMsg->hMaterial))
       {
         // Unknown names are ignored: not every shader declares every property.
         // The error material is shared by every failed material, it never takes properties.
-        if (it->second != g_pErrorMaterial)
+        if (pMaterial != g_pErrorMaterial)
         {
-          SetMaterialProperty(it->second, pMsg->uNameHash, pMsg->aData, pMsg->uSize);
+          SetMaterialProperty(pMaterial, pMsg->uNameHash, pMsg->aData, pMsg->uSize);
         }
-      }
-      else if (GetResourceState(pMsg->hMaterial) == ResourceState::LOADING)
-      {
-        StorePendingMaterialProperty(*pMsg);
       }
     }
     break;
@@ -690,20 +690,8 @@ void Render(MailboxHandle _hMailbox)
 
     for (const auto& oPair : g_dctRenderObjects)
     {
-      const Mesh* pMesh = nullptr;
-      Material* pMaterial = nullptr;
-
-      auto itMesh = g_dctMeshes.find(oPair.second.hMesh);
-      if (itMesh != g_dctMeshes.end())
-      {
-        pMesh = &itMesh->second;
-      }
-
-      auto itMat = g_dctMaterials.find(oPair.second.hMaterial);
-      if (itMat != g_dctMaterials.end())
-      {
-        pMaterial = itMat->second;
-      }
+      const Mesh* pMesh = FindMesh(oPair.second.hMesh);
+      Material* pMaterial = FindMaterial(oPair.second.hMaterial);
 
       if (pMaterial && pMesh)
       {
@@ -735,10 +723,10 @@ static bool HasWork()
 {
   return g_bRenderThreadExit
     || GetMailbox(g_hNextReadMailbox).eState == MAILBOX_READY
-    || g_pCreateRequestRing->Peek() != nullptr;
+    || PeekQueueMessageLocked(&g_oCreateQueue) != nullptr;
 }
 
-void RequestRenderThreadExit()
+void render::RequestRenderThreadExit()
 {
   {
     std::lock_guard<std::mutex> lock(g_oRenderMutex);
@@ -797,38 +785,18 @@ static void DestroyErrorResources()
 }
 
 // Render thread owns every GPU resource it created, so it destroys them before exiting.
-// Requests still in the create ring are just dropped: the ring memory belongs to the main thread.
+// Messages still in the create queue are just dropped: the queue memory belongs to the main thread.
 static void DestroyRenderResources(ThreadArenas* _pArenas)
 {
-  // Failed handles share the error resources, destroyed once below
-  for (auto& oPair : g_dctMeshes)
-  {
-    if (oPair.second.pApiMesh != g_oErrorMesh.pApiMesh)
-    {
-      api::DestroyMesh(oPair.second.pApiMesh);
-    }
-  }
-  g_dctMeshes.clear();
-
-  for (auto& oPair : g_dctMaterials)
-  {
-    if (oPair.second != g_pErrorMaterial)
-    {
-      DestroyMaterial(oPair.second);
-    }
-  }
-  g_dctMaterials.clear();
+  // Failed handles share the error resources, destroyed once after them
+  UnloadSceneResources(&_pArenas->oScene);
 
   g_dctRenderObjects.clear();
-  g_uPendingMaterialPropertyCount = 0u;
 
   DestroyErrorResources();
-
-  // Every object living in the scene arena has been destroyed above
-  _pArenas->oScene.Reset();
 }
 
-void RenderThreadFnc()
+void render::RenderThreadFnc()
 {
   ThreadArenas* pArenas = CreateThreadArenas(RENDER_THREAD_ARENAS_CONFIG);
 
@@ -836,7 +804,7 @@ void RenderThreadFnc()
 
   while (true)
   {
-    const CreateRequestBase* pRequest = nullptr;
+    const MessageHeader* pResourceMsg = nullptr;
     bool bHasFrame = false;
     MailboxHandle hReadMailbox = 0;
 
@@ -852,8 +820,8 @@ void RenderThreadFnc()
         break;
       }
 
-      // Got create request? grab it (it stays in the ring until processed)
-      pRequest = static_cast<const CreateRequestBase*>(g_pCreateRequestRing->Peek());
+      // Got a resource message? grab it (it stays in the queue until processed)
+      pResourceMsg = PeekQueueMessageLocked(&g_oCreateQueue);
 
       // Next frame (in production order) ready? grab it
       Mailbox& oNext = GetMailbox(g_hNextReadMailbox);
@@ -866,16 +834,12 @@ void RenderThreadFnc()
       }
     }
 
-    if (pRequest)
+    if (pResourceMsg)
     {
-      ProcessResourceCreateRequests(&pArenas->oScene, pRequest);
+      ProcessResourceMessage(&pArenas->oScene, pResourceMsg);
 
-      {
-        std::lock_guard<std::mutex> lock(g_oRenderMutex);
-        g_pCreateRequestRing->Free(const_cast<CreateRequestBase*>(pRequest));
-      }
-      // Wakes the loader thread if it is waiting for room in the ring
-      g_oCreateRingSpaceCV.notify_one();
+      // Also wakes the loader thread if it is waiting for room in the queue
+      FreeQueueMessage(&g_oCreateQueue, pResourceMsg);
     }
 
     if (bHasFrame)

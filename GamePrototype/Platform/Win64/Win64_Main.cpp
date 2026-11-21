@@ -56,7 +56,7 @@ LRESULT WndProc(
   {
     OutputDebugStringA("WM_SIZE\n");
     // The render thread owns the swapchain, let it handle the resize
-    RequestWindowResize();
+    render::RequestWindowResize();
   }
   break;
   case WM_DESTROY:
@@ -166,7 +166,7 @@ int WINAPI WinMain(
   ThreadArenas* pArenas = CreateThreadArenas(g_oMainThreadArenasConfig);
 
   // Before any thread that uses them starts
-  InitRenderer(&pArenas->oGlobal);
+  render::InitRenderer(&pArenas->oGlobal);
   InitResourceLoader(&pArenas->oGlobal);
 
   WNDCLASS oWndClass = {};
@@ -219,7 +219,7 @@ int WINAPI WinMain(
 
   // From here on, only the render thread touches the graphics API
   // (until it is joined below).
-  std::thread oRenderThread(RenderThreadFnc);
+  std::thread oRenderThread(render::RenderThreadFnc);
   std::thread oLoaderThread(WorkerThreadProcessLoadRequests);
 
   Game_Init(pArenas);
@@ -248,14 +248,14 @@ int WINAPI WinMain(
     ImGui::NewFrame();
 
     // Blocks while the render thread still holds this mailbox (at most one frame ahead)
-    const MailboxHandle hMailbox = AcquireMailboxWrite();
+    const MailboxHandle hMailbox = render::AcquireMailboxWrite();
 
     Game_Update(pArenas, hMailbox, g_fDeltaTime);
 
     ImGui::Render();
-    SubmitImGuiDrawData(hMailbox, ImGui::GetDrawData());
+    render::SubmitImGuiDrawData(hMailbox, ImGui::GetDrawData());
 
-    ReleaseMailboxWrite(hMailbox);
+    render::ReleaseMailboxWrite(hMailbox);
 
     Sleep(16);     // just to slow down the loop a bit, not required
     
@@ -292,7 +292,7 @@ int WINAPI WinMain(
   RequestLoaderThreadExit();
   oLoaderThread.join();
 
-  RequestRenderThreadExit();
+  render::RequestRenderThreadExit();
   oRenderThread.join();
 
   // Render thread is gone, the main thread owns the API again
